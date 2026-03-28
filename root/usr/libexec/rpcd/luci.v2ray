@@ -34,6 +34,7 @@ get_v2ray_version() {
 	local file="$(uci -q get v2ray.main.v2ray_file)"
 	local core
 	local ver
+	local major
 	if [ ! -s "$file" ] ; then
 		echo '{ "code": 1 }'
 		return
@@ -41,9 +42,9 @@ get_v2ray_version() {
 
 	test -x "$file" || chmod +x "$file"
 
-	local version="$(sh -c "$file --version 2>/dev/null | head -n1")"
+	local version="$("$file" --version 2>/dev/null | head -n1)"
 	if [ -z "$version" ] ; then
-		version="$(sh -c "$file version 2>/dev/null | head -n1")"
+		version="$("$file" version 2>/dev/null | head -n1)"
 	fi
 
 	if [ -z "$version" ] ; then
@@ -51,16 +52,28 @@ get_v2ray_version() {
 		return
 	fi
 
-	core=$(echo $version | awk -F' ' '{printf $1}')
-	if [ "$core" != "V2Ray" ] ; then
+	core="$(printf '%s\n' "$version" | awk '{print $1}')"
+	ver="$(printf '%s\n' "$version" | awk '{print $2}')"
+	major="$(printf '%s\n' "$ver" | awk -F'.' '{print $1}')"
+
+	if [ -z "$core" ] || [ -z "$ver" ] ; then
 		echo '{ "code": 1 }'
 		return
 	fi
 
-	ver=$(echo $version | awk -F' ' '{printf $2}')
-	uci set v2ray.main.core=$core
-	uci set v2ray.main.version=$ver
-	printf '{ "code": 0, "version": "  Core:%s   Version:%s" }\n' "$core" "$ver"
+	case "$core" in
+		V2Ray|Xray|xray|sing-box|singbox)
+			uci set v2ray.main.core="$core"
+			uci set v2ray.main.version="$ver"
+			if [ -n "$major" ] ; then
+				uci set v2ray.main.major="$major"
+			fi
+			printf '{ "code": 0, "version": "Core:%s Version:%s" }\n' "$core" "$ver"
+		;;
+		*)
+			echo '{ "code": 1 }'
+		;;
+	esac
 }
 
 get_list_status() {

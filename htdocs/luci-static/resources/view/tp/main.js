@@ -84,7 +84,9 @@ return view.extend({
 		o.rmempty = false;
 
 		o = s.option(form.DummyValue, '_gfw_list', _('GFWList'));
-		o.value = '/etc/v2ray/gfwlist.txt';
+		o.cfgvalue = function() {
+			return '/etc/v2ray/gfwlist.txt';
+		};
 
 		o = s.option(custom.TextValue, '_proxy_list', _('Extra proxy list'));
 		o.wrap = 'off';
