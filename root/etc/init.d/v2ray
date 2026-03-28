@@ -32,8 +32,6 @@ IPSET_DST_DIRECT_V6=v2ray_dst_direct_v6
 OUTBOUND_SERVERS_V4=
 OUTBOUND_SERVERS_V6=
 
-FAKEDNS_ENABLED=0
-
 TRANSPARENT_PROXY_EXPECTED=0
 TRANSPARENT_PROXY_PORT=
 TRANSPARENT_PROXY_USE_TPROXY=
@@ -213,12 +211,6 @@ add_v2ray_nftables_redirect_rules() {
 					fi
 				)
 				meta l4proto tcp mark 0xff counter accept
-				$(
-					if [ "$FAKEDNS_ENABLED" = "1" ] ; then
-						echo -e "ip daddr 192.18.0.0/15 meta l4proto tcp counter redirect to :$port\n \
-							ip6 daddr fc00::/18 meta l4proto tcp counter redirect to :$port"
-					fi
-				)
 				ip daddr @$IPSET_DST_DIRECT_V4 counter accept
 				ip saddr @$IPSET_SRC_DIRECT_V4 counter accept
 				ip6 daddr @$IPSET_DST_DIRECT_V6 counter accept
@@ -261,26 +253,6 @@ add_v2ray_nftables_redirect_rules() {
 				}
 				chain v2ray_udp_rules {
 					meta mark 0xff counter accept
-					$(
-						if [ -n "$lan_ipaddrs" ] ; then
-							local ipaddr
-							for ipaddr in $lan_ipaddrs ; do
-								echo "ip daddr $ipaddr udp dport 53 counter tproxy ip to :$port meta mark set 1"
-							done
-						fi
-						if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
-							if [ -n "$lan_ip6addrs" ] ; then
-								local ip6adr
-								for ip6addr in $lan_ip6addrs ; do
-									echo "ip6 daddr $ip6addr udp dport 53 counter tproxy ip6 to :$port meta mark set 1"
-								done
-							fi
-						fi
-						if [ "$FAKEDNS_ENABLED" = "1" ] ; then
-							echo -e "ip daddr 192.18.0.0/15 meta l4proto udp counter tproxy ip to :$port meta mark set 1\n \
-							ip6 daddr fc00::/18 meta l4proto udp counter tproxy ip6 to :$port meta mark set 1"
-						fi
-					)
 							
 					ip daddr @$IPSET_DST_DIRECT_V4 counter accept
 					ip saddr @$IPSET_SRC_DIRECT_V4 counter accept
@@ -298,18 +270,12 @@ add_v2ray_nftables_redirect_rules() {
 				chain udp_output {
 					type nat hook output priority filter; policy accept;
 					meta l4proto udp mark 0xff counter accept
-					udp dport 53 counter meta mark set 1
 					$(
 						if [ -n "$EXCLUDED_UDP_PORT" ] ; then
 							local eup
 							for eup in $EXCLUDED_UDP_PORT ; do
 								echo "udp sport $eup counter accept"
 							done
-						fi
-					
-						if [ "$FAKEDNS_ENABLED" = "1" ] ; then
-							echo -e "ip daddr 192.18.0.0/15 meta l4proto udp mark set 1\n \
-								ip6 daddr fc00::/18 meta l4proto udp mark set 1"
 						fi
 					)
 					ip daddr @$IPSET_DST_DIRECT_V4 counter accept
@@ -366,28 +332,6 @@ add_v2ray_nftables_tproxy_rules() {
 			}
 			chain v2ray_rules {
 				meta mark 0xff counter return
-				$(
-					if [ -n "$addition" ] ; then
-						if [ -n "$lan_ipaddrs" ] ; then
-							local ipaddr
-							for ipaddr in $lan_ipaddrs ; do
-								echo "ip daddr $ipaddr udp dport 53 counter tproxy ip to :$port meta mark set 1"
-							done
-						fi
-						if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
-							if [ -n "$lan_ip6addrs" ] ; then
-								local ip6addr
-								for ip6addr in $lan_ip6addrs ; do
-									echo "ip6 daddr $ip6addr udp dport 53 counter tproxy ip6 to :$port meta mark set 1"
-								done
-							fi
-						fi
-					fi
-					if [ "$FAKEDNS_ENABLED" = "1" ] ; then
-						echo -e "ip daddr 192.18.0.0/15 meta l4proto { tcp, udp } tproxy ip to :$port meta mark set 1\n \
-							ip6 daddr fc00::/18 meta l4proto { tcp, udp } tproxy ip6 to :$port meta mark set 1"
-					fi
-				)
 				ip daddr @$IPSET_DST_DIRECT_V4 counter return
 				ip saddr @$IPSET_SRC_DIRECT_V4 counter return
 				ip6 daddr @$IPSET_DST_DIRECT_V6 counter return
@@ -410,9 +354,6 @@ add_v2ray_nftables_tproxy_rules() {
 				type route hook output priority mangle; policy accept; 
 				meta mark 0xff counter accept
 				$(
-					if [ -n "$addition" ] ; then
-						echo -e "udp dport 53 counter meta mark set 1"
-					fi
 					if  [ -n "$EXCLUDED_TCP_PORT" ] ; then
 						local etp
 						for etp in $EXCLUDED_TCP_PORT ; do
@@ -425,12 +366,6 @@ add_v2ray_nftables_tproxy_rules() {
 							echo "udp sport $eup counter accept"
 						done
 					fi
-				)
-				$(
-					if [ "$FAKEDNS_ENABLED" = "1" ] ; then
-						echo -e "ip daddr 192.18.0.0/15 counter meta l4proto { tcp, udp } mark set 1\n \
-							ip6 daddr fc00::/18 counter meta l4proto { tcp, udp } mark set 1" 
-					fi 
 				)
 				ip daddr @$IPSET_DST_DIRECT_V4 counter accept
 				ip saddr @$IPSET_SRC_DIRECT_V4 counter accept
