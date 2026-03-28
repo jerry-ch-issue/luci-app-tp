@@ -1,6 +1,6 @@
 {
   "admin/services/tp": {
-    "title": "MyApp",
+    "title": "TP",
     "order": 60,
     "action": {
       "type": "view",
@@ -9,10 +9,7 @@
     "depends": {
       "acl": [
         "luci-app-tp"
-      ],
-      "uci": {
-        "v2ray": true
-      }
+      ]
     }
   }
 }
