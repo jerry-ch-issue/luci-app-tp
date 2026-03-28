@@ -31,10 +31,10 @@ check_running_status() {
 }
 
 get_v2ray_version() {
+	# 优先从 UCI 获取路径，如果没有则设置默认常用路径
 	local file="$(uci -q get v2ray.main.v2ray_file)"
-	local core
-	local ver
-	local major
+	[ -z "$file" ] && file="/usr/bin/v2ray"
+
 	if [ ! -s "$file" ] ; then
 		echo '{ "code": 1 }'
 		return
@@ -42,33 +42,37 @@ get_v2ray_version() {
 
 	test -x "$file" || chmod +x "$file"
 
-	local version="$("$file" --version 2>/dev/null | head -n1)"
-	if [ -z "$version" ] ; then
-		version="$("$file" version 2>/dev/null | head -n1)"
-	fi
-
-	if [ -z "$version" ] ; then
+	# 获取第一行输出：V2Ray 4.45.2 (OpenWrt) ...
+	local version_info="$("$file" --version 2>/dev/null | head -n1)"
+	
+	if [ -z "$version_info" ] ; then
 		echo '{ "code": 1 }'
 		return
 	fi
 
-	core="$(printf '%s\n' "$version" | awk '{print $1}')"
-	ver="$(printf '%s\n' "$version" | awk '{print $2}')"
-	major="$(printf '%s\n' "$ver" | awk -F'.' '{print $1}')"
+	# 提取第一个单词作为 Core (V2Ray)
+	# 提取第二个单词作为 Ver (4.45.2)
+	local core=$(echo "$version_info" | awk '{print $1}')
+	local ver=$(echo "$version_info" | awk '{print $2}')
+	local major=$(echo "$ver" | cut -d. -f1)
 
+	# 验证提取是否成功
 	if [ -z "$core" ] || [ -z "$ver" ] ; then
 		echo '{ "code": 1 }'
 		return
 	fi
 
+	# 匹配 Core 名称（注意此处大小写要敏感或包含在内）
 	case "$core" in
-		V2Ray|Xray|xray|sing-box|singbox)
-			uci set v2ray.main.core="$core"
-			uci set v2ray.main.version="$ver"
-			if [ -n "$major" ] ; then
-				uci set v2ray.main.major="$major"
+		V2Ray|Xray|xray|sing-box|singbox|v2ray)
+			# 如果 UCI 配置文件存在，则写入
+			if uci get v2ray.main >/dev/null 2>&1; then
+				uci set v2ray.main.core="$core"
+				uci set v2ray.main.version="$ver"
+				[ -n "$major" ] && uci set v2ray.main.major="$major"
+				uci commit v2ray
 			fi
-			printf '{ "code": 0, "version": "Core:%s Version:%s" }\n' "$core" "$ver"
+			printf '{ "code": 0, "version": "Core: %s, Version: %s" }\n' "$core" "$ver"
 		;;
 		*)
 			echo '{ "code": 1 }'
