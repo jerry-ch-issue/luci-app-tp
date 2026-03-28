@@ -1,0 +1,92 @@
+msgid ""
+msgstr "Content-Type: text/plain; charset=UTF-8"
+
+msgid "tp"
+msgstr "tp"
+
+msgid "Global Settings"
+msgstr "全局设置"
+
+msgid "Enabled"
+msgstr "已启用"
+
+msgid "Reload Service"
+msgstr "重载服务"
+
+msgid "Reload"
+msgstr "重载"
+
+msgid "Reload service failed with code %d"
+msgstr "重载服务失败，错误码 %d"
+
+msgid "Core file"
+msgstr "内核文件"
+
+msgid "Config file"
+msgstr "配置文件"
+
+msgid "Transparent Proxy"
+msgstr "透明代理"
+
+msgid "Redirect port"
+msgstr "转发端口"
+
+msgid "LAN interfaces"
+msgstr "LAN 接口"
+
+msgid "Use TProxy"
+msgstr "使用 TProxy"
+
+msgid "Proxy IPv6"
+msgstr "代理 IPv6"
+
+msgid "Redirect UDP"
+msgstr "转发 UDP"
+
+msgid "Proxy mode"
+msgstr "代理模式"
+
+msgid "GFWList Proxy"
+msgstr "GFWList 代理"
+
+msgid "GFWList"
+msgstr "GFWList"
+
+msgid "Extra proxy list"
+msgstr "额外的代理列表"
+
+msgid "Extra direct list"
+msgstr "额外的直连列表"
+
+msgid "Proxy list DNS"
+msgstr "代理列表 DNS"
+
+msgid "Direct list DNS"
+msgstr "直连列表 DNS"
+
+msgid "Local devices direct outbound list"
+msgstr "本地设备直接连出列表"
+
+msgid "%s is required."
+msgstr "%s 为必填项。"
+
+msgid "Invalid JSON content."
+msgstr "JSON 内容无效。"
+
+msgid "Version: %s"
+msgstr "版本：%s"
+
+msgid "Unable to get core version."
+msgstr "无法获取内核版本。"
+
+msgid "Not Running"
+msgstr "未运行"
+
+msgid "Running"
+msgstr "运行中"
+
+msgid "Collecting data..."
+msgstr "正在收集数据..."
+
+msgid "Getting..."
+msgstr "获取中..."

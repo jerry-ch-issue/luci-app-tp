@@ -1,0 +1,941 @@
+#!/bin/sh /etc/rc.common
+#
+# Copyright 2019-2020 Xingwang Liao <kuoruan@gmail.com>
+# Licensed to the public under the MIT License.
+#
+
+START=99
+USE_PROCD=1
+
+NAME=v2ray
+
+FILE_V2RAY_DNSMASQ=/tmp/dnsmasq.d/$NAME
+FILE_V2RAY_DNSMASQ_CACHE=/tmp/$NAME.dnsmasq.cache
+
+CORE=
+CORE_VER=
+
+NFT_BIN=$(command -v nft)
+
+NFT_SET=$(expr $(dnsmasq --version|head -n 1|awk -F " " '{printf $3}') \>= "2.87")	
+
+
+
+IPSET_SRC_IGNORE_V4=v2ray_src_ignore_v4
+IPSET_SRC_IGNORE_V6=v2ray_src_ignore_v6
+IPSET_DST_PROXY_V4=v2ray_dst_proxy_v4
+IPSET_DST_PROXY_V6=v2ray_dst_proxy_v6
+IPSET_SRC_DIRECT_V4=v2ray_src_direct_v4
+IPSET_DST_DIRECT_V4=v2ray_dst_direct_v4
+IPSET_DST_DIRECT_V6=v2ray_dst_direct_v6
+
+OUTBOUND_SERVERS_V4=
+OUTBOUND_SERVERS_V6=
+
+FAKEDNS_ENABLED=0
+
+TRANSPARENT_PROXY_EXPECTED=0
+TRANSPARENT_PROXY_PORT=
+TRANSPARENT_PROXY_USE_TPROXY=
+TRANSPARENT_PROXY_ADDITION=
+TRANSPARENT_PROXY_IPV6=0
+EXCLUDED_TCP_PORT=
+EXCLUDED_UDP_PORT=
+DNSMASQ_RESTART_EXPECTED=0
+
+. /usr/share/libubox/jshn.sh
+
+_log() {
+	local level="$1" ; shift
+	local msg="$@"
+	logger -p "daemon.$level" -t "$NAME" "$msg"
+
+	echo "[$level] $msg" >&2
+}
+
+_info() {
+	_log "info" $@
+}
+
+_err() {
+	_log "err" $@
+}
+
+get_value_from_json() {
+	local json="$1"
+	local key="$2"
+
+	test -n "$json" || return
+
+	local value=""
+
+	local old_ns
+	json_set_namespace "json_key" old_ns
+	json_load "$json"
+	json_get_var "$key" value
+	json_cleanup
+	json_set_namespace "$old_ns"
+
+	echo "$value"
+}
+
+get_commands_from_json() {
+	local json="$1"
+
+	test -n "$json" || return
+
+	jshn -r "$json" 2>/dev/null | grep -v "json_init"
+}
+
+get_file_content() {
+	local filename="$1"
+
+	test -n "$filename" || return
+	test -r "/etc/v2ray/${filename}.txt" || return
+
+	cat "/etc/v2ray/${filename}.txt" | grep -v "^$" | grep -v "^#"
+}
+
+append_server_ipv4() {
+	local addr="$1"
+
+	test -n "$addr" || return
+
+	if [ -z "$OUTBOUND_SERVERS_V4" ] ; then
+		OUTBOUND_SERVERS_V4="$addr"
+	else
+		local ipa
+		for ipa in $OUTBOUND_SERVERS_V4 ; do
+			if [ "$addr" = "$ipa" ] ; then
+				return
+			fi
+		done
+
+		OUTBOUND_SERVERS_V4="$(cat >&1 <<-EOF
+			$OUTBOUND_SERVERS_V4
+			$addr
+		EOF
+		)"
+	fi
+}
+
+append_server_ipv6() {
+	local addr="$1"
+
+	test -n "$addr" || return
+
+	if [ -z "$OUTBOUND_SERVERS_V6" ] ; then
+		OUTBOUND_SERVERS_V6="$addr"
+	else	
+		local ipa
+		for ipa in $OUTBOUND_SERVERS_V6 ; do
+			if [ "$addr" = "$ipa" ] ; then
+				return
+			fi
+		done
+		OUTBOUND_SERVERS_V6="$(cat >&1 <<-EOF
+			$OUTBOUND_SERVERS_V6
+			$addr
+		EOF
+		)"
+	fi
+}
+
+append_server_address() {
+	local addr="$1"
+
+	test -n "$addr" || return
+
+	local ipv4
+	for ipv4 in $(resolveip -4 -t 5 "$addr") ; do
+		append_server_ipv4 "$ipv4"
+	done
+
+	local ipv6
+	for ipv6 in $(resolveip -6 -t 5 "$addr") ; do
+		append_server_ipv6 "$ipv6"
+	done
+}
+
+v2ray_section_validate() {
+	uci_validate_section "$NAME" "v2ray" "$1" \
+		'enabled:bool:0' \
+		'v2ray_file:string' \
+		'asset_location:directory' \
+		'config_file:file'
+}
+
+
+
+
+
+
+
+
+
+
+
+add_v2ray_nftables_redirect_rules() {
+	local ext_args="$1"
+	local ext_args6="$2"
+	local lan_devices="$3"
+	local lan_ipaddrs="$4"
+	local lan_ip6addrs="$5"
+	local proxy_mode="$6"
+	local port="$TRANSPARENT_PROXY_PORT"
+	local addition="$TRANSPARENT_PROXY_ADDITION"
+	
+	$NFT_BIN -f - <<-EOF >/dev/null  
+		table inet $NAME {
+			chain tcp_prerouting { 
+				type nat hook prerouting priority dstnat; policy accept;
+				$(
+					if [ -n "$lan_devices" ] ; then
+						local devices	
+						for device in $lan_devices ; do
+							echo "iifname $device meta l4proto tcp counter jump v2ray_tcp_rules"
+						done
+					else
+						echo "meta nfproto ipv4 meta l4proto tcp counter jump v2ray_tcp_rules"
+						if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+							echo "meta nfproto ipv6 meta l4proto tcp counter jump v2ray_tcp_rules"
+						fi
+					fi
+				)
+			}
+			chain v2ray_tcp_rules {
+				$(
+					if [ -n "$EXCLUDED_TCP_PORT" ] ; then
+						local etp
+						for etp in $EXCLUDED_TCP_PORT; do
+							echo "tcp sport $etp counter accept"
+						done
+					fi
+				)
+				meta l4proto tcp mark 0xff counter accept
+				$(
+					if [ "$FAKEDNS_ENABLED" = "1" ] ; then
+						echo -e "ip daddr 192.18.0.0/15 meta l4proto tcp counter redirect to :$port\n \
+							ip6 daddr fc00::/18 meta l4proto tcp counter redirect to :$port"
+					fi
+				)
+				ip daddr @$IPSET_DST_DIRECT_V4 counter accept
+				ip saddr @$IPSET_SRC_DIRECT_V4 counter accept
+				ip6 daddr @$IPSET_DST_DIRECT_V6 counter accept
+				meta nfproto ipv4 tcp $ext_args counter redirect to :$port
+				$(
+					if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+						echo "meta nfproto ipv6 tcp $ext_args6 counter redirect to :$port"
+					fi
+				)
+			}
+			chain tcp_output {
+				type nat hook output priority filter; policy accept;
+				counter jump v2ray_tcp_rules
+			}
+		}
+	EOF
+	if [ -n "$addition" ] ; then
+		ip rule add fwmark 1 table 100
+		ip route add local default dev lo table 100
+		if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+			ip -6 rule add fwmark 1 table 100
+			ip -6 route add local default dev lo table 100
+		fi
+		$NFT_BIN -f - <<-EOF >/dev/null
+			table inet $NAME {
+				chain udp_prerouting {
+					type filter	hook prerouting priority mangle; policy accept;
+					$(
+						if [ -n "$lan_devices" ] ; then
+							local device
+							for device in $lan_devices ; do
+								echo "iifname $device meta l4proto udp counter jump v2ray_udp_rules"
+							done
+						fi
+						echo "meta nfproto ipv4 meta l4proto udp counter jump v2ray_udp_rules"
+						if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+							echo "meta nfproto ipv6 meta l4proto udp counter jump v2ray_udp_rules"
+						fi
+					)
+				}
+				chain v2ray_udp_rules {
+					meta mark 0xff counter accept
+					$(
+						if [ -n "$lan_ipaddrs" ] ; then
+							local ipaddr
+							for ipaddr in $lan_ipaddrs ; do
+								echo "ip daddr $ipaddr udp dport 53 counter tproxy ip to :$port meta mark set 1"
+							done
+						fi
+						if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+							if [ -n "$lan_ip6addrs" ] ; then
+								local ip6adr
+								for ip6addr in $lan_ip6addrs ; do
+									echo "ip6 daddr $ip6addr udp dport 53 counter tproxy ip6 to :$port meta mark set 1"
+								done
+							fi
+						fi
+						if [ "$FAKEDNS_ENABLED" = "1" ] ; then
+							echo -e "ip daddr 192.18.0.0/15 meta l4proto udp counter tproxy ip to :$port meta mark set 1\n \
+							ip6 daddr fc00::/18 meta l4proto udp counter tproxy ip6 to :$port meta mark set 1"
+						fi
+					)
+							
+					ip daddr @$IPSET_DST_DIRECT_V4 counter accept
+					ip saddr @$IPSET_SRC_DIRECT_V4 counter accept
+					ip6 daddr @$IPSET_DST_DIRECT_V6 counter accept
+					
+					$(
+						if [ "$addition" = "udp" ] ; then
+							echo "meta nfproto ipv4 udp $ext_args counter tproxy ip to :$port meta mark set 1"
+							if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+								echo "meta nfproto ipv6 udp $ext_args6 counter tproxy ip6 to :$port meta mark set 1"
+							fi
+						fi
+					)
+				}
+				chain udp_output {
+					type nat hook output priority filter; policy accept;
+					meta l4proto udp mark 0xff counter accept
+					udp dport 53 counter meta mark set 1
+					$(
+						if [ -n "$EXCLUDED_UDP_PORT" ] ; then
+							local eup
+							for eup in $EXCLUDED_UDP_PORT ; do
+								echo "udp sport $eup counter accept"
+							done
+						fi
+					
+						if [ "$FAKEDNS_ENABLED" = "1" ] ; then
+							echo -e "ip daddr 192.18.0.0/15 meta l4proto udp mark set 1\n \
+								ip6 daddr fc00::/18 meta l4proto udp mark set 1"
+						fi
+					)
+					ip daddr @$IPSET_DST_DIRECT_V4 counter accept
+					ip saddr @$IPSET_SRC_DIRECT_V4 counter accept
+					ip6 daddr @$IPSET_DST_DIRECT_V6 counter accept
+					$(
+						if [ "$addition" = "udp" ] ; then
+							echo "meta nfproto ipv4 udp $ext_args counter meta mark set 1"
+							if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+								echo "meta nfproto ipv6 udp $ext_args6 counter meta mark set 1"
+							fi
+						fi
+					)
+				}
+			}
+		EOF
+	fi
+}
+
+add_v2ray_nftables_tproxy_rules() {
+	local ext_args="$1"
+	local ext_args6="$2"
+	local lan_devices="$3"
+	local lan_ipaddrs="$4"
+	local lan_ip6addrs="$5"
+	local proxy_mode="$6"
+	local port="$TRANSPARENT_PROXY_PORT"
+	local addition="$TRANSPARENT_PROXY_ADDITION"
+	
+	test -n "$port" || return
+
+	ip rule add fwmark 1 table 100
+	ip route add local default dev lo table 100
+	if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+		ip -6 rule add fwmark 1 table 100
+		ip -6 route add local default dev lo table 100
+	fi
+
+	$NFT_BIN -f -<<-EOF
+		#!$NFT_BIN -f
+		table inet $NAME {
+			chain divert { 
+				type filter hook prerouting priority mangle; policy accept; 
+				meta l4proto tcp socket transparent 1 counter meta mark set 1 accept
+				$(
+					if [ -n "$lan_devices" ] ; then 
+						local device 
+						for device in $lan_devices ; do
+							echo "iifname $device counter jump v2ray_rules"
+						done
+					fi
+				)
+				meta mark 1 counter jump v2ray_rules
+			}
+			chain v2ray_rules {
+				meta mark 0xff counter return
+				$(
+					if [ -n "$addition" ] ; then
+						if [ -n "$lan_ipaddrs" ] ; then
+							local ipaddr
+							for ipaddr in $lan_ipaddrs ; do
+								echo "ip daddr $ipaddr udp dport 53 counter tproxy ip to :$port meta mark set 1"
+							done
+						fi
+						if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+							if [ -n "$lan_ip6addrs" ] ; then
+								local ip6addr
+								for ip6addr in $lan_ip6addrs ; do
+									echo "ip6 daddr $ip6addr udp dport 53 counter tproxy ip6 to :$port meta mark set 1"
+								done
+							fi
+						fi
+					fi
+					if [ "$FAKEDNS_ENABLED" = "1" ] ; then
+						echo -e "ip daddr 192.18.0.0/15 meta l4proto { tcp, udp } tproxy ip to :$port meta mark set 1\n \
+							ip6 daddr fc00::/18 meta l4proto { tcp, udp } tproxy ip6 to :$port meta mark set 1"
+					fi
+				)
+				ip daddr @$IPSET_DST_DIRECT_V4 counter return
+				ip saddr @$IPSET_SRC_DIRECT_V4 counter return
+				ip6 daddr @$IPSET_DST_DIRECT_V6 counter return
+				meta nfproto ipv4 tcp $ext_args counter tproxy ip to :$port meta mark set 1
+				$(
+					if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+						echo "meta nfproto ipv6 tcp $ext_args6 counter tproxy ip6 to :$port meta mark set 1"
+					fi
+				)
+				$(
+					if [ "$addition" = "udp" ] ; then
+						echo "meta nfproto ipv4 udp $ext_args counter tproxy ip to :$port meta mark set 1"
+						if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+							echo "meta nfproto ipv6 udp $ext_args6 counter tproxy ip6 to :$port meta mark set 1"
+						fi
+					fi
+				)
+			}
+			chain v2ray_output { 
+				type route hook output priority mangle; policy accept; 
+				meta mark 0xff counter accept
+				$(
+					if [ -n "$addition" ] ; then
+						echo -e "udp dport 53 counter meta mark set 1"
+					fi
+					if  [ -n "$EXCLUDED_TCP_PORT" ] ; then
+						local etp
+						for etp in $EXCLUDED_TCP_PORT ; do
+							echo "tcp sport $etp counter accept"
+						done
+					fi
+					if [ -n "$EXCLUDED_UDP_PORT" ] ; then
+						local eup
+						for eup in $EXCLUDED_UDP_PORT ; do
+							echo "udp sport $eup counter accept"
+						done
+					fi
+				)
+				$(
+					if [ "$FAKEDNS_ENABLED" = "1" ] ; then
+						echo -e "ip daddr 192.18.0.0/15 counter meta l4proto { tcp, udp } mark set 1\n \
+							ip6 daddr fc00::/18 counter meta l4proto { tcp, udp } mark set 1" 
+					fi 
+				)
+				ip daddr @$IPSET_DST_DIRECT_V4 counter accept
+				ip saddr @$IPSET_SRC_DIRECT_V4 counter accept
+				ip6 daddr @$IPSET_DST_DIRECT_V6 counter accept
+				meta nfproto ipv4 tcp $ext_args counter meta mark set 1
+				$(
+					if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+						echo "meta nfproto ipv6 tcp $ext_args6 counter meta mark set 1"
+					fi
+					if [ "$addition" = "udp" ] ; then
+						echo "meta nfproto ipv4 udp $ext_args" counter meta mark set 1
+						if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+							echo "meta nfproto ipv6 udp $ext_args6 counter meta mark set 1"
+						fi
+					fi
+				)
+			}
+		}
+	EOF
+}
+
+clear_v2ray_rules() {
+	$NFT_BIN delete table inet v2ray 2>/dev/null 
+	while ip rule del fwmark 1 lookup 100 2>/dev/null ; do true ; done
+	while ip -6 rule del fwmark 1 lookup 100 2>/dev/null ; do true ; done
+	ip route flush table 100 2>/dev/null
+	ip -6 route flush table 100 2>/dev/null
+	ip route del local 0.0.0.0/0 dev lo table 100 2>/dev/null
+	ip -6 route del local ::/0 dev lo table 100 2>/dev/null
+}
+
+create_v2ray_ipset() {
+	# https://en.wikipedia.org/wiki/Reserved_IP_addresses
+	local reserved_v4="$(cat >&1 <<-EOF
+		0.0.0.0/8
+		10.0.0.0/8
+		100.64.0.0/10
+		127.0.0.0/8
+		169.254.0.0/16
+		172.16.0.0/12
+		192.0.0.0/24
+		192.0.2.0/24
+		192.88.99.0/24
+		192.168.0.0/16
+		192.18.0.0/15
+		198.51.100.0/24
+		203.0.113.0/24
+		224.0.0.0/4
+		240.0.0.0/4
+		255.255.255.255
+	EOF
+	)"
+
+	local reserved_v6="$(cat >&1 <<-EOF
+		::
+		::/128
+		::1/128
+		::ffff:0:0/96
+		::ffff:0:0:0/96
+		64:ff9b::/96
+		100::/64
+		2001::/32
+		2001:20::/28
+		2001:db8::/32
+		2002::/16
+		fc00::/7
+		fe80::/10
+		ff00::/8
+	EOF
+	)"
+
+	local outbound_v4="$OUTBOUND_SERVERS_V4"
+	local outbound_v6="$OUTBOUND_SERVERS_V6"
+	$NFT_BIN  -f -<<-EOF 
+		#!$NFT_BIN -f
+		table inet $NAME {
+			set $IPSET_DST_DIRECT_V4 { 
+				type ipv4_addr
+				flags interval
+				auto-merge
+				elements = { 
+				$(
+					if [ -z "$outbound_v4" ] ; then
+						echo "$reserved_v4" | sed '$d' | sed 's/240\.0\.0\.0\/4/240\.0\.0\.0\-255\.255\.255\.255/' | sed '$!s/$/,/'
+					else
+						echo "$reserved_v4" | sed '$d' | sed 's/240\.0\.0\.0\/4/240\.0\.0\.0\-255\.255\.255\.255/' | sed 's/$/,/'
+						echo "$outbound_v4" | sed '$!s/$/,/'
+					fi
+				)
+				}
+			} 
+			set $IPSET_SRC_DIRECT_V4 { 
+				type ipv4_addr
+				flags interval
+				auto-merge
+			}
+			set $IPSET_DST_PROXY_V4 {
+				type ipv4_addr
+				flags interval, timeout
+				timeout 7d
+				auto-merge
+			}
+			set $IPSET_DST_DIRECT_V6 { 
+				type ipv6_addr
+				flags interval
+				auto-merge
+				elements = { 
+				$(
+					if [ -z "$outbound_v6" ] ; then
+						echo "$reserved_v6" | sed '1d' | sed '$!s/$/,/'
+					else
+						echo "$reserved_v6" | sed '1d' | sed 's/$/,/'
+						echo "$outbound_v6" | sed '$!s/$/,/'
+					fi
+				)
+				}
+			}
+			set $IPSET_DST_PROXY_V6 {
+				type ipv6_addr
+				flags interval, timeout
+				timeout 7d
+				auto-merge
+			}
+		}
+	EOF
+}
+
+init_rules_for_listfile() {
+	local direct_list_dns="$1"
+	local proxy_list_dns="$2"
+
+	echo "# AUTO-GENERATED FILE. DO NOT MODIFY." >"$FILE_V2RAY_DNSMASQ_CACHE"
+
+	# For direct list
+	local direct_content
+	direct_content="$(get_file_content "directlist")"
+
+	if [ -n "$direct_content" ] ; then
+		if [ -n "$direct_list_dns" ] ; then
+			echo "$direct_content" | \
+				grep -oE "([0-9a-zA-Z_-]+\.)+[a-zA-Z]{2,}$" | \
+				sed "s|.*|server=/&/$direct_list_dns\nnftset=/&/inet#v2ray#$IPSET_DST_DIRECT_V4,inet#v2ray#$IPSET_DST_DIRECT_V6|" \
+				>>"$FILE_V2RAY_DNSMASQ_CACHE"
+		else
+			echo "$direct_content" | \
+				grep -oE "([0-9a-zA-Z_-]+\.)+[a-zA-Z]{2,}$" | \
+				sed "s|.*|nftset=/&/inet#v2ray#$IPSET_DST_DIRECT_V4,inet#v2ray#$IPSET_DST_DIRECT_V6|" \
+				>>"$FILE_V2RAY_DNSMASQ_CACHE"
+		fi
+		local direct_v4=$(echo "$direct_content" | grep -oE "[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?" )
+		local direct_v6=$(echo "$direct_content" | grep -oE "([0-9a-fA-F]{0,4}:){1,7}([0-9a-fA-F]){0,4}(/[0-9]{1,2})?" )
+		if [ -n "$direct_v4" ] ; then
+			$NFT_BIN add element inet v2ray $IPSET_DST_DIRECT_V4 { $(echo "$direct_v4" | sed "$!s/$/,/") }
+		fi
+		if [ -n "$direct_v6" ] ; then
+			$NFT_BIN add element inet v2ray $IPSET_DST_DIRECT_V6 { $(echo "$direct_v6" | sed "$!s/$/,/") }
+		fi
+	fi
+
+	# For proxy list
+	local proxy_content
+	proxy_content="$(get_file_content "proxylist")"
+	
+	if [ -n "$proxy_content" ] ; then
+		if [ -n "$proxy_list_dns" ] ; then
+			echo "$proxy_content" | \
+				grep -oE "([0-9a-zA-Z_-]+\.)+[a-zA-Z]{2,}$" | \
+				sed "s|.*|server=/&/$proxy_list_dns\nnftset=/&/inet#v2ray#$IPSET_DST_PROXY_V4,inet#v2ray#$IPSET_DST_PROXY_V6|" \
+				>>"$FILE_V2RAY_DNSMASQ_CACHE"
+		else
+			echo "$proxy_content" | \
+				grep -oE "([0-9a-zA-Z_-]+\.)+[a-zA-Z]{2,}$" | \
+				sed "s|.*|nftset=/&/inet#v2ray#$IPSET_DST_PROXY_V4,inet#v2ray#$IPSET_DST_PROXY_V6|" \
+				>>"$FILE_V2RAY_DNSMASQ_CACHE"
+		fi
+		local proxy_v4=$(echo "$proxy_content" | grep -oE "[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?" )
+		local proxy_v6=$(echo "$proxy_content" | grep -oE "([0-9a-fA-F]{0,4}:){1,7}([0-9a-fA-F]){0,4}(/[0-9]{1,2})?" )
+		if [ -n "$proxy_v4" ] ; then
+			$NFT_BIN add element inet v2ray $IPSET_DST_PROXY_V4 \
+				{ $(echo "$proxy_v4" | sed "s/$/ timeout 1008d/" | sed "$!s/$/,/") }
+		fi
+		if [ -n "$proxy_v6" ] ; then
+			$NFT_BIN add element inet v2ray $IPSET_DST_PROXY_V6 \
+				{ $(echo "$proxy_v6" | sed "s/$/ timeout 1008d/" | sed "$!s/$/,/") }
+		fi
+	fi
+  # For local devices outbound list
+	local src_content
+	src_content="$(get_file_content "srcdirectlist")"
+
+	if [ -n "$src_content" ] ; then
+		local src_v4=$(echo "$src_content" | grep -oE "[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?")
+		if [ -n "$src_v4" ] ; then
+			$NFT_BIN add element inet v2ray $IPSET_SRC_DIRECT_V4 \
+			{ $(echo  "$src_v4" | sed '$!s/$/,/') }
+		fi
+	fi
+}
+
+gracefully_restart_dnsmasq() {
+	if [ "x$DNSMASQ_RESTART_EXPECTED" = "x1" ] && [ -x "/etc/init.d/dnsmasq" ] ; then
+		_info "Restarting dnsmasq..."
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1
+		DNSMASQ_RESTART_EXPECTED=0
+	fi
+}
+
+
+
+
+
+
+
+
+init_transparent_proxy() {
+	local tp_cfg="main_transparent_proxy"
+	local redirect_port use_tproxy redirect_udp redirect_dns ipv6_tproxy
+
+	config_get redirect_port "$tp_cfg" "redirect_port"
+	config_get_bool use_tproxy "$tp_cfg" "use_tproxy" "0"
+	config_get_bool redirect_udp "$tp_cfg" "redirect_udp" "0"
+	config_get_bool redirect_dns "$tp_cfg" "redirect_dns" "0"
+	config_get_bool ipv6_tproxy "$tp_cfg" "ipv6_tproxy" "0"
+	if [ -n "$redirect_port" ] && \
+		! validate_data "port" "$redirect_port" 2>/dev/null ; then
+		_err "Transparent proxy redirect port is invalid: $redirect_port"
+		return 1
+	fi
+
+	TRANSPARENT_PROXY_PORT="$redirect_port"
+	TRANSPARENT_PROXY_USE_TPROXY="$use_tproxy"
+	TRANSPARENT_PROXY_IPV6="$ipv6_tproxy"
+
+	if [ "x$redirect_udp" = "x1" ] ; then
+		TRANSPARENT_PROXY_ADDITION="udp"
+	elif [ "x$redirect_dns" = "x1" ] ; then
+		TRANSPARENT_PROXY_ADDITION="dns"
+	else
+		TRANSPARENT_PROXY_ADDITION=
+	fi
+}
+
+setup_transparent_proxy() {
+	if [ -z "$TRANSPARENT_PROXY_PORT" ] ; then
+		_info "Transparent proxy disabled."
+		return 0
+	fi
+
+	if [ "x$TRANSPARENT_PROXY_EXPECTED" != "x1" ] ; then
+		_info "No v2ray instance enabled, skip transparent proxy."
+		return 0
+	fi
+
+	_info "Setting transparent proxy on port: $TRANSPARENT_PROXY_PORT"
+
+
+
+	local tp_cfg="main_transparent_proxy"
+	local lan_ifaces only_privileged_ports proxy_mode direct_list_dns proxy_list_dns
+	local excluded_tcp_port excluded_udp_port
+
+	config_get lan_ifaces "$tp_cfg" "lan_ifaces"
+	config_get_bool only_privileged_ports "$tp_cfg" "only_privileged_ports" "0"
+	config_get proxy_mode "$tp_cfg" "proxy_mode"
+	config_get direct_list_dns "$tp_cfg" "direct_list_dns"
+	config_get proxy_list_dns "$tp_cfg" "proxy_list_dns"
+	config_get EXCLUDED_TCP_PORT "$tp_cfg" "excluded_tcp_port"
+	config_get EXCLUDED_UDP_PORT "$tp_cfg" "excluded_udp_port"
+
+	test -n "$EXCLUDED_TCP_PORT" && \
+		_info "Unproxied tcp port(s): $EXCLUDED_TCP_PORT"
+	
+	test -n "$EXCLUDED_UDP_PORT" && \
+		_info "Unproxied udp port(s): $EXCLUDED_UDP_PORT"
+
+	_info "Transparent proxy mode: $proxy_mode"
+	if [ -n "$NFT_BIN" ] ; then
+		if [ "$NFT_SET" = "0" ] ; then
+			_info "GFWList mode requires DNSmasq 2.87 above, TProxy reset to 'default' Mode"
+		fi
+	fi
+	test -n "$NFT_BIN" && $NFT_BIN add table inet $NAME
+
+	create_v2ray_ipset
+	init_rules_for_listfile "$direct_list_dns" "$proxy_list_dns"
+
+	local ext_args
+	local ext_args6
+	case "${proxy_mode:-gfwlist_proxy}" in
+		"gfwlist_proxy")
+			local gfwlist="$(get_file_content "gfwlist")"
+			if [ -n "$gfwlist" ] ; then
+				if [ -n "$proxy_list_dns" ] ; then
+					echo "$gfwlist" | \
+						sed "s|.*|server=/&/$proxy_list_dns\nnftset=/&/inet\#v2ray\#$IPSET_DST_PROXY_V4,inet\#v2ray\#$IPSET_DST_PROXY_V6|" \
+						>> "$FILE_V2RAY_DNSMASQ_CACHE"
+				else
+					echo "$gfwlist" | \
+						sed "s|.*|nftset=/&/inet\#v2ray\#$IPSET_DST_PROXY_V4,inet\#v2ray\#$IPSET_DST_PROXY_V6|" \
+						>> "$FILE_V2RAY_DNSMASQ_CACHE"
+				fi
+				ext_args="ip daddr @$IPSET_DST_PROXY_V4"
+				ext_args6="ip6 daddr @$IPSET_DST_PROXY_V6"
+			else
+				ext_args=
+				ext_args6=
+			fi
+			;;
+		*)
+			_info "Unsupported proxy mode '$proxy_mode', fallback to global mode."
+			ext_args=
+			ext_args6=
+			;;
+	esac
+
+	if [ "x$only_privileged_ports" = "x1" ] ; then
+			ext_args="dport { 0 - 1023 } $ext_args"
+			ext_args6="dport { 0 - 1023 } $ext_args6"
+	else
+			ext_args="dport { 0 - 65535 } $ext_args"
+			ext_args6="dport { 0 - 65535 } $ext_args6"
+	fi
+
+	if [ -n "$(cat "$FILE_V2RAY_DNSMASQ_CACHE" | grep -v "^$" | grep -v "^#")" ] ; then
+			local dir="$(dirname "$FILE_V2RAY_DNSMASQ")"
+			test -d "$dir" || mkdir -p "$dir"
+			cat "$FILE_V2RAY_DNSMASQ_CACHE" >"$FILE_V2RAY_DNSMASQ" 2>/dev/null
+			DNSMASQ_RESTART_EXPECTED=1
+	fi
+
+	rm -f "$FILE_V2RAY_DNSMASQ_CACHE"
+
+	local lan_devices lan_ipaddrs lan_ip6addrs
+
+	if [ -n "$lan_ifaces" ] ; then
+		. /lib/functions/network.sh
+
+		local lan
+		for lan in $lan_ifaces ; do
+			local device ipaddrs ipaddr ip6addrs ip6addr
+			network_get_device device "$lan"
+			network_get_ipaddrs ipaddrs "$lan"
+			network_get_ipaddrs6 ip6addrs "$lan"
+
+			if [ -n "$device" ] ; then
+				if [ -n "$lan_devices" ] ; then
+					lan_devices="$lan_devices $device"
+				else
+					lan_devices="$device"
+				fi
+			fi
+			if [ -n "$ipaddrs" ] ; then
+				for ipaddr in $ipaddrs ; do
+					if [ -n "$lan_ipaddrs" ] ; then
+						lan_ipaddrs="$ipaddr"
+					else
+						lan_ipaddrs="$lan_ipaddrs $ipaddr"
+					fi
+				done
+			fi
+			
+			if [ -n "$ip6addrs" ] ; then
+				for ip6addr in $ip6addrs; do
+					if [ -n "$lan_ip6addrs" ] ; then
+						lan_ip6addrs="$lan_ip6addrs $ip6addr"
+					else
+						lan_ip6addrs="$ip6addr"
+					fi
+				done
+			fi
+		done
+	fi
+	if [ "x$TRANSPARENT_PROXY_USE_TPROXY" = "x1" ] ; then
+			_info "Use TProxy to setup nftables"
+			add_v2ray_nftables_tproxy_rules "$ext_args" "$ext_args6" "$lan_devices" "$lan_ipaddrs" "$lan_ip6addrs" "$proxy_mode"
+	else
+			add_v2ray_nftables_redirect_rules "$ext_args" "$ext_args6" "$lan_devices" "$lan_ipaddrs" "$lan_ip6addrs" "$proxy_mode"
+	fi
+}
+
+clear_transparent_proxy() {
+	clear_v2ray_rules
+
+	if [ -s "$FILE_V2RAY_DNSMASQ" ] ; then
+		rm -f "$FILE_V2RAY_DNSMASQ"
+		DNSMASQ_RESTART_EXPECTED=1
+	fi
+}
+
+start_instance() {
+	local section="$1"
+	local ver_info
+	
+	if ! v2ray_section_validate "$section" ; then
+		_err "Invalid config."
+		return 1
+	fi
+
+	if [ -z "$v2ray_file" ] || [ ! -s "$v2ray_file" ] ; then
+		_err "Invalid V2Ray file."
+		return 1
+	fi
+
+	test -x "$v2ray_file" || chmod 755 "$v2ray_file"
+
+	ver_info="$(sh -c "$v2ray_file --version 2>/dev/null | head -n1")"
+	if [ -z "$ver_info" ] ; then
+		ver_info="$(sh -c "$v2ray_file version 2>/dev/null | head -n1")"
+	fi
+	CORE="$(echo $ver_info | awk -F' ' '{printf $1}')"
+	CORE_VER="$(echo $ver_info | awk -F' ' '{printf $2}')"
+	uci set v2ray.main.core=$CORE
+	uci commit
+
+	if [ "x$enabled" != "x1" ] ; then
+		_info "Service disabled: $section"
+		return 0
+	fi
+	
+	local temp_config
+	if [ -z "$config_file" ] ; then
+		_err "Config file is required."
+		return 1
+	fi
+
+	if [ ! -s "$config_file" ] ; then
+		_err "Config file not found: $config_file"
+		return 1
+	fi
+
+	if ! ( eval "$v2ray_file --test --config=\"$config_file\" >/dev/null 2>&1" ) ; then
+		_err "Validate config file failed: $config_file"
+		return 1
+	fi
+
+	local file_content="$(cat "$config_file")"
+	local config_commands="$(get_commands_from_json "$file_content")"
+	local addr
+	for addr in $(echo "$config_commands" | sed -n "s/^json.*'address'[[:space:]]'\([^']*\)'.*/\1/p") ; do
+		append_server_address "$addr"
+	done
+	temp_config="$config_file"
+
+	TRANSPARENT_PROXY_EXPECTED=1
+
+	procd_open_instance "$NAME.$section"
+	procd_set_param command "$v2ray_file"
+	if [ "$CORE" = "V2Ray" ] && [ "$(expr $CORE_VER \< "5")" = "1" ] ; then
+		procd_append_param command "-c=$temp_config"
+	else
+		procd_append_param command "run"
+		procd_append_param command "-c=$temp_config"
+	fi
+	procd_set_param respawn
+
+	if [ -n "$asset_location" ] && [ -d "$asset_location" ] ; then
+		procd_set_param env V2RAY_LOCATION_ASSET="$asset_location"
+	fi
+
+	# cat /proc/PID/limits to see if limits works
+	procd_set_param limits nofile="102400 102400"
+	procd_append_param limits core="0 0"
+
+	procd_set_param file "$temp_config"
+	procd_set_param stderr 1 # forward stderr of the command to logd
+	procd_set_param stdout 1
+	procd_set_param pidfile "/var/run/${NAME}.${section}.pid"
+	procd_close_instance
+}
+
+start_service() {
+	clear_transparent_proxy
+
+	config_load "$NAME"
+
+	if ! init_transparent_proxy ; then
+		gracefully_restart_dnsmasq
+		return 1
+	fi
+
+	config_foreach start_instance "v2ray"
+
+	setup_transparent_proxy
+	gracefully_restart_dnsmasq
+
+	unset OUTBOUND_SERVERS_V4 \
+		OUTBOUND_SERVERS_V6 \
+		TRANSPARENT_PROXY_EXPECTED \
+		TRANSPARENT_PROXY_PORT \
+		TRANSPARENT_PROXY_ADDITION \
+		DNSMASQ_RESTART_EXPECTED \
+		IPV6_TPROXY_ENABLED
+}
+
+stop_service() {
+	if [ "x$action" = "xrestart" ] ; then
+		# skip when restarting, start_service will do this
+		return 0
+	fi
+
+	clear_transparent_proxy
+	gracefully_restart_dnsmasq
+
+}
+
+service_triggers() {
+	procd_add_reload_trigger "$NAME"
+}
