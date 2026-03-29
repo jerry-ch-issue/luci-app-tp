@@ -68,15 +68,13 @@ return view.extend({
 		};
 		o.rmempty = false;
 
-		o = s.option(form.Flag, 'use_tproxy', _('Use TProxy'));
-		o.default = '1';
-		o.rmempty = false;
-
 		o = s.option(form.Flag, 'ipv6_tproxy', _('Proxy IPv6'));
-		o.default = '1';
+		o.rmempty = false;
+		o.default = '0'; // 可选，表示默认勾选
 
 		o = s.option(form.Flag, 'redirect_udp', _('Redirect UDP'));
-		o.default = '1';
+		o.rmempty = false;
+		o.default = '0'; // 可选
 
 		o = s.option(form.ListValue, 'proxy_mode', _('Proxy mode'));
 		o.value('gfwlist_proxy', _('GFWList Proxy'));
