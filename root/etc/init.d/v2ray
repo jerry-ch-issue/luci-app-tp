@@ -34,7 +34,7 @@ OUTBOUND_SERVERS_V6=
 
 TRANSPARENT_PROXY_EXPECTED=0
 TRANSPARENT_PROXY_PORT=
-TRANSPARENT_PROXY_USE_TPROXY=
+# TRANSPARENT_PROXY_USE_TPROXY=
 TRANSPARENT_PROXY_ADDITION=
 TRANSPARENT_PROXY_IPV6=0
 EXCLUDED_TCP_PORT=
@@ -190,9 +190,11 @@ add_v2ray_nftables_tproxy_rules() {
 				type filter hook prerouting priority mangle; policy accept; 
 				meta l4proto tcp socket transparent 1 counter meta mark set 1 accept
 				$(
-					if [ -n "$lan_devices" ] ; then 
-						local device 
-						for device in $lan_devices ; do
+					if [ -n "$lan_devices" ]; then
+						local device
+						# 将接口列表按空格拆分，去重后循环
+						for device in $(echo $lan_devices | tr -s ' ' '\n' | sort -u); do
+							# 输出规则
 							echo "iifname $device counter jump v2ray_rules"
 						done
 					fi
@@ -451,10 +453,10 @@ gracefully_restart_dnsmasq() {
 
 init_transparent_proxy() {
 	local tp_cfg="main_transparent_proxy"
-	local redirect_port use_tproxy redirect_udp ipv6_tproxy
+	local redirect_port redirect_udp ipv6_tproxy
 
 	config_get redirect_port "$tp_cfg" "redirect_port"
-	config_get_bool use_tproxy "$tp_cfg" "use_tproxy" "0"
+# 	config_get_bool use_tproxy "$tp_cfg" "use_tproxy" "0"
 	config_get_bool redirect_udp "$tp_cfg" "redirect_udp" "0"
 	config_get_bool ipv6_tproxy "$tp_cfg" "ipv6_tproxy" "0"
 	if [ -n "$redirect_port" ] && \
@@ -464,7 +466,7 @@ init_transparent_proxy() {
 	fi
 
 	TRANSPARENT_PROXY_PORT="$redirect_port"
-	TRANSPARENT_PROXY_USE_TPROXY="$use_tproxy"
+# 	TRANSPARENT_PROXY_USE_TPROXY="$use_tproxy"
 	TRANSPARENT_PROXY_IPV6="$ipv6_tproxy"
 
 	if [ "x$redirect_udp" = "x1" ] ; then
