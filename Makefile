@@ -12,8 +12,8 @@ PKG_LICENSE:=MIT
 PKG_MAINTAINER:=Xingwang Liao <kuoruan@gmail.com>
 
 LUCI_TITLE:=LuCI support for tp (V2Ray)
-LUCI_DEPENDS:=+jshn +ip +nftables-json +kmod-nft-socket +kmod-nft-tproxy \
-	+resolveip +dnsmasq-full +procd-ujail
+LUCI_DEPENDS:=+jshn +ip +iptables +ip6tables +ipset +kmod-ipt-tproxy \
+	+iptables-mod-tproxy +iptables-mod-socket +resolveip +dnsmasq-full +procd-ujail
 LUCI_PKGARCH:=all
 
 define Package/$(PKG_NAME)/conffiles
