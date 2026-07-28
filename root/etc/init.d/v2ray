@@ -17,7 +17,6 @@ CORE_VER=
 
 NFT_BIN=$(command -v nft)
 
-NFT_SET=$(expr $(dnsmasq --version|head -n 1|awk -F " " '{printf $3}') \>= "2.87")	
 
 
 
@@ -510,11 +509,6 @@ setup_transparent_proxy() {
 		_info "Unproxied udp port(s): $EXCLUDED_UDP_PORT"
 
 	_info "Transparent proxy mode: $proxy_mode"
-	if [ -n "$NFT_BIN" ] ; then
-		if [ "$NFT_SET" = "0" ] ; then
-			_info "GFWList mode requires DNSmasq 2.87 above, TProxy reset to 'default' Mode"
-		fi
-	fi
 	test -n "$NFT_BIN" && $NFT_BIN add table inet $NAME
 
 	create_v2ray_ipset
