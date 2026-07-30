@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 #
-# Copyright 2019-2020 Xingwang Liao <kuoruan@gmail.com>
-# Licensed to the public under the MIT License.
+# Optimized V2Ray/Xray Init Script for OpenWrt
+# Removed JSON parsing & Timeouts, using Nftables TPROXY
 #
 
 START=99
@@ -17,9 +17,6 @@ CORE_VER=
 
 NFT_BIN=$(command -v nft)
 
-
-
-
 IPSET_SRC_IGNORE_V4=v2ray_src_ignore_v4
 IPSET_SRC_IGNORE_V6=v2ray_src_ignore_v6
 IPSET_DST_PROXY_V4=v2ray_dst_proxy_v4
@@ -28,25 +25,18 @@ IPSET_SRC_DIRECT_V4=v2ray_src_direct_v4
 IPSET_DST_DIRECT_V4=v2ray_dst_direct_v4
 IPSET_DST_DIRECT_V6=v2ray_dst_direct_v6
 
-OUTBOUND_SERVERS_V4=
-OUTBOUND_SERVERS_V6=
-
 TRANSPARENT_PROXY_EXPECTED=0
 TRANSPARENT_PROXY_PORT=
-# TRANSPARENT_PROXY_USE_TPROXY=
 TRANSPARENT_PROXY_ADDITION=
 TRANSPARENT_PROXY_IPV6=0
 EXCLUDED_TCP_PORT=
 EXCLUDED_UDP_PORT=
 DNSMASQ_RESTART_EXPECTED=0
 
-. /usr/share/libubox/jshn.sh
-
 _log() {
 	local level="$1" ; shift
 	local msg="$@"
 	logger -p "daemon.$level" -t "$NAME" "$msg"
-
 	echo "[$level] $msg" >&2
 }
 
@@ -58,100 +48,14 @@ _err() {
 	_log "err" $@
 }
 
-get_value_from_json() {
-	local json="$1"
-	local key="$2"
-
-	test -n "$json" || return
-
-	local value=""
-
-	local old_ns
-	json_set_namespace "json_key" old_ns
-	json_load "$json"
-	json_get_var "$key" value
-	json_cleanup
-	json_set_namespace "$old_ns"
-
-	echo "$value"
-}
-
-get_commands_from_json() {
-	local json="$1"
-
-	test -n "$json" || return
-
-	jshn -r "$json" 2>/dev/null | grep -v "json_init"
-}
-
 get_file_content() {
 	local filename="$1"
 
 	test -n "$filename" || return
 	test -r "/etc/v2ray/${filename}.txt" || return
 
-	cat "/etc/v2ray/${filename}.txt" | grep -v "^$" | grep -v "^#"
-}
-
-append_server_ipv4() {
-	local addr="$1"
-
-	test -n "$addr" || return
-
-	if [ -z "$OUTBOUND_SERVERS_V4" ] ; then
-		OUTBOUND_SERVERS_V4="$addr"
-	else
-		local ipa
-		for ipa in $OUTBOUND_SERVERS_V4 ; do
-			if [ "$addr" = "$ipa" ] ; then
-				return
-			fi
-		done
-
-		OUTBOUND_SERVERS_V4="$(cat >&1 <<-EOF
-			$OUTBOUND_SERVERS_V4
-			$addr
-		EOF
-		)"
-	fi
-}
-
-append_server_ipv6() {
-	local addr="$1"
-
-	test -n "$addr" || return
-
-	if [ -z "$OUTBOUND_SERVERS_V6" ] ; then
-		OUTBOUND_SERVERS_V6="$addr"
-	else	
-		local ipa
-		for ipa in $OUTBOUND_SERVERS_V6 ; do
-			if [ "$addr" = "$ipa" ] ; then
-				return
-			fi
-		done
-		OUTBOUND_SERVERS_V6="$(cat >&1 <<-EOF
-			$OUTBOUND_SERVERS_V6
-			$addr
-		EOF
-		)"
-	fi
-}
-
-append_server_address() {
-	local addr="$1"
-
-	test -n "$addr" || return
-
-	local ipv4
-	for ipv4 in $(resolveip -4 -t 5 "$addr") ; do
-		append_server_ipv4 "$ipv4"
-	done
-
-	local ipv6
-	for ipv6 in $(resolveip -6 -t 5 "$addr") ; do
-		append_server_ipv6 "$ipv6"
-	done
+	# 修复 Windows \r 换行符问题
+	cat "/etc/v2ray/${filename}.txt" | grep -v "^$" | grep -v "^#" | tr -d '\r'
 }
 
 v2ray_section_validate() {
@@ -161,7 +65,6 @@ v2ray_section_validate() {
 		'asset_location:directory' \
 		'config_file:file'
 }
-
 
 add_v2ray_nftables_tproxy_rules() {
 	local ext_args="$1"
@@ -191,9 +94,7 @@ add_v2ray_nftables_tproxy_rules() {
 				$(
 					if [ -n "$lan_devices" ]; then
 						local device
-						# 将接口列表按空格拆分，去重后循环
 						for device in $(echo $lan_devices | tr -s ' ' '\n' | sort -u); do
-							# 输出规则
 							echo "iifname $device counter jump v2ray_rules"
 						done
 					fi
@@ -246,7 +147,7 @@ add_v2ray_nftables_tproxy_rules() {
 						echo "meta nfproto ipv6 tcp $ext_args6 counter meta mark set 1"
 					fi
 					if [ "$addition" = "udp" ] ; then
-						echo "meta nfproto ipv4 udp $ext_args" counter meta mark set 1
+						echo "meta nfproto ipv4 udp $ext_args counter meta mark set 1"
 						if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
 							echo "meta nfproto ipv6 udp $ext_args6 counter meta mark set 1"
 						fi
@@ -268,7 +169,6 @@ clear_v2ray_rules() {
 }
 
 create_v2ray_ipset() {
-	# https://en.wikipedia.org/wiki/Reserved_IP_addresses
 	local reserved_v4="$(cat >&1 <<-EOF
 		0.0.0.0/8
 		10.0.0.0/8
@@ -307,9 +207,8 @@ create_v2ray_ipset() {
 	EOF
 	)"
 
-	local outbound_v4="$OUTBOUND_SERVERS_V4"
-	local outbound_v6="$OUTBOUND_SERVERS_V6"
-	$NFT_BIN  -f -<<-EOF 
+	# 已删除所有的 timeout 配置，仅保留 interval 和 auto-merge
+	$NFT_BIN -f -<<-EOF 
 		#!$NFT_BIN -f
 		table inet $NAME {
 			set $IPSET_DST_DIRECT_V4 { 
@@ -317,14 +216,7 @@ create_v2ray_ipset() {
 				flags interval
 				auto-merge
 				elements = { 
-				$(
-					if [ -z "$outbound_v4" ] ; then
-						echo "$reserved_v4" | sed '$d' | sed 's/240\.0\.0\.0\/4/240\.0\.0\.0\-255\.255\.255\.255/' | sed '$!s/$/,/'
-					else
-						echo "$reserved_v4" | sed '$d' | sed 's/240\.0\.0\.0\/4/240\.0\.0\.0\-255\.255\.255\.255/' | sed 's/$/,/'
-						echo "$outbound_v4" | sed '$!s/$/,/'
-					fi
-				)
+				$(echo "$reserved_v4" | sed '$d' | sed 's/240\.0\.0\.0\/4/240\.0\.0\.0\-255\.255\.255\.255/' | sed '$!s/$/,/')
 				}
 			} 
 			set $IPSET_SRC_DIRECT_V4 { 
@@ -342,14 +234,7 @@ create_v2ray_ipset() {
 				flags interval
 				auto-merge
 				elements = { 
-				$(
-					if [ -z "$outbound_v6" ] ; then
-						echo "$reserved_v6" | sed '1d' | sed '$!s/$/,/'
-					else
-						echo "$reserved_v6" | sed '1d' | sed 's/$/,/'
-						echo "$outbound_v6" | sed '$!s/$/,/'
-					fi
-				)
+				$(echo "$reserved_v6" | sed '1d' | sed '$!s/$/,/')
 				}
 			}
 			set $IPSET_DST_PROXY_V6 {
@@ -372,6 +257,7 @@ init_rules_for_listfile() {
 	direct_content="$(get_file_content "directlist")"
 
 	if [ -n "$direct_content" ] ; then
+		# 修复了 dnsmasq # 符号转义 Bug
 		if [ -n "$direct_list_dns" ] ; then
 			echo "$direct_content" | \
 				grep -oE "([0-9a-zA-Z_-]+\.)+[a-zA-Z]{2,}$" | \
@@ -383,8 +269,11 @@ init_rules_for_listfile() {
 				sed "s|.*|nftset=/&/4#inet#v2ray#$IPSET_DST_DIRECT_V4,6#inet#v2ray#$IPSET_DST_DIRECT_V6|" \
 				>>"$FILE_V2RAY_DNSMASQ_CACHE"
 		fi
+		
+		# 修复了 IPv6 /128 正则截断漏洞
 		local direct_v4=$(echo "$direct_content" | grep -oE "[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?" )
 		local direct_v6=$(echo "$direct_content" | grep -oE "([0-9a-fA-F]{0,4}:){1,7}([0-9a-fA-F]){0,4}(/[0-9]{1,3})?" )
+		
 		if [ -n "$direct_v4" ] ; then
 			$NFT_BIN add element inet v2ray $IPSET_DST_DIRECT_V4 { $(echo "$direct_v4" | sed "$!s/$/,/") }
 		fi
@@ -398,19 +287,23 @@ init_rules_for_listfile() {
 	proxy_content="$(get_file_content "proxylist")"
 	
 	if [ -n "$proxy_content" ] ; then
+		# 修复了 dnsmasq # 符号转义 Bug
 		if [ -n "$proxy_list_dns" ] ; then
 			echo "$proxy_content" | \
 				grep -oE "([0-9a-zA-Z_-]+\.)+[a-zA-Z]{2,}$" | \
-				sed "s|.*|server=/&/$proxy_list_dns\nnftset=/&/4\#inet\#v2ray\#$IPSET_DST_PROXY_V4,6\#inet\#v2ray\#$IPSET_DST_PROXY_V6|" \
+				sed "s|.*|server=/&/$proxy_list_dns\nnftset=/&/4#inet#v2ray#$IPSET_DST_PROXY_V4,6#inet#v2ray#$IPSET_DST_PROXY_V6|" \
 				>>"$FILE_V2RAY_DNSMASQ_CACHE"
 		else
 			echo "$proxy_content" | \
 				grep -oE "([0-9a-zA-Z_-]+\.)+[a-zA-Z]{2,}$" | \
-				sed "s|.*|nftset=/&/4\#inet\#v2ray\#$IPSET_DST_PROXY_V4,6\#inet\#v2ray\#$IPSET_DST_PROXY_V6|" \
+				sed "s|.*|nftset=/&/4#inet#v2ray#$IPSET_DST_PROXY_V4,6#inet#v2ray#$IPSET_DST_PROXY_V6|" \
 				>>"$FILE_V2RAY_DNSMASQ_CACHE"
 		fi
+		
 		local proxy_v4=$(echo "$proxy_content" | grep -oE "[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?" )
 		local proxy_v6=$(echo "$proxy_content" | grep -oE "([0-9a-fA-F]{0,4}:){1,7}([0-9a-fA-F]){0,4}(/[0-9]{1,3})?" )
+		
+		# 彻底移除了 timeout 1008d
 		if [ -n "$proxy_v4" ] ; then
 			$NFT_BIN add element inet v2ray $IPSET_DST_PROXY_V4 \
 				{ $(echo "$proxy_v4" | sed "$!s/$/,/") }
@@ -420,7 +313,8 @@ init_rules_for_listfile() {
 				{ $(echo "$proxy_v6" | sed "$!s/$/,/") }
 		fi
 	fi
-  # For local devices outbound list
+
+	# For local devices outbound list
 	local src_content
 	src_content="$(get_file_content "srcdirectlist")"
 
@@ -428,7 +322,7 @@ init_rules_for_listfile() {
 		local src_v4=$(echo "$src_content" | grep -oE "[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?")
 		if [ -n "$src_v4" ] ; then
 			$NFT_BIN add element inet v2ray $IPSET_SRC_DIRECT_V4 \
-			{ $(echo  "$src_v4" | sed '$!s/$/,/') }
+			{ $(echo "$src_v4" | sed '$!s/$/,/') }
 		fi
 	fi
 }
@@ -441,19 +335,11 @@ gracefully_restart_dnsmasq() {
 	fi
 }
 
-
-
-
-
-
-
-
 init_transparent_proxy() {
 	local tp_cfg="main_transparent_proxy"
 	local redirect_port redirect_udp ipv6_tproxy
 
 	config_get redirect_port "$tp_cfg" "redirect_port"
-# 	config_get_bool use_tproxy "$tp_cfg" "use_tproxy" "0"
 	config_get_bool redirect_udp "$tp_cfg" "redirect_udp" "0"
 	config_get_bool ipv6_tproxy "$tp_cfg" "ipv6_tproxy" "0"
 	if [ -n "$redirect_port" ] && \
@@ -463,7 +349,6 @@ init_transparent_proxy() {
 	fi
 
 	TRANSPARENT_PROXY_PORT="$redirect_port"
-# 	TRANSPARENT_PROXY_USE_TPROXY="$use_tproxy"
 	TRANSPARENT_PROXY_IPV6="$ipv6_tproxy"
 
 	if [ "x$redirect_udp" = "x1" ] ; then
@@ -485,8 +370,6 @@ setup_transparent_proxy() {
 	fi
 
 	_info "Setting transparent proxy on port: $TRANSPARENT_PROXY_PORT"
-
-
 
 	local tp_cfg="main_transparent_proxy"
 	local lan_ifaces only_privileged_ports proxy_mode direct_list_dns proxy_list_dns
@@ -518,13 +401,14 @@ setup_transparent_proxy() {
 		"gfwlist_proxy")
 			local gfwlist="$(get_file_content "gfwlist")"
 			if [ -n "$gfwlist" ] ; then
+				# 修复了 dnsmasq # 符号转义 Bug
 				if [ -n "$proxy_list_dns" ] ; then
 					echo "$gfwlist" | \
-						sed "s|.*|server=/&/$proxy_list_dns\nnftset=/&/4\#inet\#v2ray\#$IPSET_DST_PROXY_V4,6\#inet\#v2ray\#$IPSET_DST_PROXY_V6|" \
+						sed "s|.*|server=/&/$proxy_list_dns\nnftset=/&/4#inet#v2ray#$IPSET_DST_PROXY_V4,6#inet#v2ray#$IPSET_DST_PROXY_V6|" \
 						>> "$FILE_V2RAY_DNSMASQ_CACHE"
 				else
 					echo "$gfwlist" | \
-						sed "s|.*|nftset=/&/4\#inet\#v2ray\#$IPSET_DST_PROXY_V4,6\#inet\#v2ray\#$IPSET_DST_PROXY_V6|" \
+						sed "s|.*|nftset=/&/4#inet#v2ray#$IPSET_DST_PROXY_V4,6#inet#v2ray#$IPSET_DST_PROXY_V6|" \
 						>> "$FILE_V2RAY_DNSMASQ_CACHE"
 				fi
 				ext_args="ip daddr @$IPSET_DST_PROXY_V4"
@@ -640,7 +524,6 @@ start_instance() {
 		return 0
 	fi
 	
-	local temp_config
 	if [ -z "$config_file" ] ; then
 		_err "Config file is required."
 		return 1
@@ -656,23 +539,17 @@ start_instance() {
 		return 1
 	fi
 
-	local file_content="$(cat "$config_file")"
-	local config_commands="$(get_commands_from_json "$file_content")"
-	local addr
-	for addr in $(echo "$config_commands" | sed -n "s/^json.*'address'[[:space:]]'\([^']*\)'.*/\1/p") ; do
-		append_server_address "$addr"
-	done
-	temp_config="$config_file"
+	# 已删除 JSON 解析和白名单域名/IP 解析的危险逻辑，改由 config.json 里的 mark: 255 处理
 
 	TRANSPARENT_PROXY_EXPECTED=1
 
 	procd_open_instance "$NAME.$section"
 	procd_set_param command "$v2ray_file"
 	if [ "$CORE" = "V2Ray" ] && [ "$(expr $CORE_VER \< "5")" = "1" ] ; then
-		procd_append_param command "-c=$temp_config"
+		procd_append_param command "-c=$config_file"
 	else
 		procd_append_param command "run"
-		procd_append_param command "-c=$temp_config"
+		procd_append_param command "-c=$config_file"
 	fi
 	procd_set_param respawn
 
@@ -680,12 +557,11 @@ start_instance() {
 		procd_set_param env V2RAY_LOCATION_ASSET="$asset_location"
 	fi
 
-	# cat /proc/PID/limits to see if limits works
 	procd_set_param limits nofile="102400 102400"
 	procd_append_param limits core="0 0"
 
-	procd_set_param file "$temp_config"
-	procd_set_param stderr 1 # forward stderr of the command to logd
+	procd_set_param file "$config_file"
+	procd_set_param stderr 1 
 	procd_set_param stdout 1
 	procd_set_param pidfile "/var/run/${NAME}.${section}.pid"
 	procd_close_instance
@@ -706,9 +582,7 @@ start_service() {
 	setup_transparent_proxy
 	gracefully_restart_dnsmasq
 
-	unset OUTBOUND_SERVERS_V4 \
-		OUTBOUND_SERVERS_V6 \
-		TRANSPARENT_PROXY_EXPECTED \
+	unset TRANSPARENT_PROXY_EXPECTED \
 		TRANSPARENT_PROXY_PORT \
 		TRANSPARENT_PROXY_ADDITION \
 		DNSMASQ_RESTART_EXPECTED \
@@ -717,13 +591,11 @@ start_service() {
 
 stop_service() {
 	if [ "x$action" = "xrestart" ] ; then
-		# skip when restarting, start_service will do this
 		return 0
 	fi
 
 	clear_transparent_proxy
 	gracefully_restart_dnsmasq
-
 }
 
 service_triggers() {
