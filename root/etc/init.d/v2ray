@@ -104,7 +104,6 @@ create_v2ray_ipset() {
 	EOF
 }
 
-# 极致高效流式处理 + 严谨的域名正则安全防线
 process_list() {
 	local listname="$1"
 	local dns_server="$2"
@@ -114,32 +113,48 @@ process_list() {
 
 	test -r "$filepath" || return
 	
-	_info "Parsing list: $listname.txt" # [日志]: 告知用户当前正在处理哪个黑/白名单
+	_info "Fast processing list: $listname.txt"
 
-	awk -v dns="$dns_server" -v s4="$set4" -v s6="$set6" -v d_file="$FILE_V2RAY_DNSMASQ_CACHE" '
+	local tmp_v4="/tmp/v2ray_v4_${listname}.nft"
+	local tmp_v6="/tmp/v2ray_v6_${listname}.nft"
+
+	# [极致优化]: 引入 v4_started/v6_started 状态机，杜绝生成空集合导致 nftables 崩溃
+	awk -v dns="$dns_server" -v s4="$set4" -v s6="$set6" -v d_file="$FILE_V2RAY_DNSMASQ_CACHE" \
+	    -v f_v4="$tmp_v4" -v f_v6="$tmp_v6" '
 	{
 		sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, "");
-		
-		# 忽略空行和注释
 		if ($0 == "" || $0 ~ /^#/) next;
 
-		# 匹配 IPv4 / CIDR
+		# 匹配 IPv4
 		if ($0 ~ /^[0-9]{1,3}(\.[0-9]{1,3}){3}(\/[0-9]{1,2})?$/) {
-			if (s4 != "") print "add element inet v2ray " s4 " { " $0 " }"
+			if (s4 != "") {
+				if (!v4_started) { print "add element inet v2ray " s4 " {" > f_v4; v4_started=1 }
+				print $0 "," > f_v4
+			}
 		}
-		# 匹配 IPv6 / CIDR
+		# 匹配 IPv6
 		else if ($0 ~ /^[a-fA-F0-9:]+(\/[0-9]{1,3})?$/ && index($0, ":") > 0) {
-			if (s6 != "") print "add element inet v2ray " s6 " { " $0 " }"
+			if (s6 != "") {
+				if (!v6_started) { print "add element inet v2ray " s6 " {" > f_v6; v6_started=1 }
+				print $0 "," > f_v6
+			}
 		}
-		# 恢复原版正则: 严格过滤合法域名，防止因错误输入导致 Dnsmasq 崩溃
-		# [注释]: [a-zA-Z][a-zA-Z]+ 等效于 {2,}，因为 Busybox 自带的轻量级 AWK 不支持大括号正则语法。
-		# [注意]: 此正则不支持泛域名（如 *.google.com）和包含数字的顶级域名，若日后遇到这类域名失效，须修改此正则。
 		else if ($0 ~ /^([0-9a-zA-Z_-]+\.)+[a-zA-Z][a-zA-Z]+$/) {
 			if (dns != "") print "server=/" $0 "/" dns >> d_file
 			if (s4 != "" && s6 != "") print "nftset=/" $0 "/4#inet#v2ray#" s4 ",6#inet#v2ray#" s6 >> d_file
 			else if (s4 != "") print "nftset=/" $0 "/4#inet#v2ray#" s4 >> d_file
 		}
-	}' "$filepath" | $NFT_BIN -f - 2>/dev/null
+	}
+	END {
+		if (v4_started) print "}" > f_v4
+		if (v6_started) print "}" > f_v6
+	}' "$filepath"
+
+	# 仅在有 IP 规则生成时，才触发系统内核调用，性能拉满
+	if [ -s "$tmp_v4" ] || [ -s "$tmp_v6" ]; then
+		cat "$tmp_v4" "$tmp_v6" 2>/dev/null | $NFT_BIN -f - 2>/dev/null
+	fi
+	rm -f "$tmp_v4" "$tmp_v6"
 }
 
 add_v2ray_nftables_tproxy_rules() {
