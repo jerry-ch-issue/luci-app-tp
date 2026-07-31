@@ -165,15 +165,13 @@ process_list() {
 
 # 注入 nftables TProxy 透明代理规则
 add_v2ray_nftables_tproxy_rules() {
-	local ext_args="$1"
-	local ext_args6="$2"
-	local lan_devices="$3"
+	local lan_devices="$1"
 	local port="$TRANSPARENT_PROXY_PORT"
 	local addition="$TRANSPARENT_PROXY_ADDITION"
 	
 	test -n "$port" || return
 
-	# 配置策略路由
+	# 策略路由标记
 	ip rule add fwmark 1 table 100
 	ip route add local 0.0.0.0/0 dev lo table 100
 	if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
@@ -181,58 +179,66 @@ add_v2ray_nftables_tproxy_rules() {
 		ip -6 route add local ::/0 dev lo table 100
 	fi
 
+	# 注入核心防火墙链 (精准匹配你的期望输出)
 	$NFT_BIN -f -<<-EOF
 		table inet $NAME {
-			# PREROUTING 阶段，处理 LAN 接口进来的流量及 TProxy 连接保持
 			chain divert { 
 				type filter hook prerouting priority mangle; policy accept; 
 				meta l4proto tcp socket transparent 1 counter meta mark set 1 accept
 				$(
 					if [ -n "$lan_devices" ]; then
 						for device in $lan_devices; do
-							echo "iifname $device counter jump v2ray_rules"
+							echo "iifname \"$device\" counter jump v2ray_rules"
 						done
 					fi
 				)
 				meta mark 1 counter jump v2ray_rules
 			}
-			# 匹配黑白名单，将命中代理的流量转交 TProxy
 			chain v2ray_rules {
 				meta mark 0xff counter return
 				ip daddr @$IPSET_DST_DIRECT_V4 counter return
 				ip saddr @$IPSET_SRC_DIRECT_V4 counter return
-				ip6 daddr @$IPSET_DST_DIRECT_V6 counter return
-				meta nfproto ipv4 tcp $ext_args counter tproxy ip to :$port meta mark set 1
 				$(
 					if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
-						echo "meta nfproto ipv6 tcp $ext_args6 counter tproxy ip6 to :$port meta mark set 1"
+						echo "ip6 daddr @$IPSET_DST_DIRECT_V6 counter return"
+					fi
+				)
+				tcp dport 0-65535 ip daddr @$IPSET_DST_PROXY_V4 counter tproxy ip to :$port meta mark set 1
+				$(
+					if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+						echo "tcp dport 0-65535 ip6 daddr @$IPSET_DST_PROXY_V6 counter tproxy ip6 to :$port meta mark set 1"
 					fi
 				)
 				$(
 					if [ "$addition" = "udp" ] ; then
-						echo "meta nfproto ipv4 udp $ext_args counter tproxy ip to :$port meta mark set 1"
+						echo "udp dport 0-65535 ip daddr @$IPSET_DST_PROXY_V4 counter tproxy ip to :$port meta mark set 1"
 						if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
-							echo "meta nfproto ipv6 udp $ext_args6 counter tproxy ip6 to :$port meta mark set 1"
+							echo "udp dport 0-65535 ip6 daddr @$IPSET_DST_PROXY_V6 counter tproxy ip6 to :$port meta mark set 1"
 						fi
 					fi
 				)
 			}
-			# 处理路由器本机发出的流量，打上 mark 交由路由表回环处理
 			chain v2ray_output { 
 				type route hook output priority mangle; policy accept; 
 				meta mark 0xff counter accept
 				ip daddr @$IPSET_DST_DIRECT_V4 counter accept
 				ip saddr @$IPSET_SRC_DIRECT_V4 counter accept
-				ip6 daddr @$IPSET_DST_DIRECT_V6 counter accept
-				meta nfproto ipv4 tcp $ext_args counter meta mark set 1
 				$(
 					if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
-						echo "meta nfproto ipv6 tcp $ext_args6 counter meta mark set 1"
+						echo "ip6 daddr @$IPSET_DST_DIRECT_V6 counter accept"
 					fi
+				)
+				tcp dport 0-65535 ip daddr @$IPSET_DST_PROXY_V4 counter meta mark set 1
+				$(
+					if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+						echo "tcp dport 0-65535 ip6 daddr @$IPSET_DST_PROXY_V6 counter meta mark set 1"
+					fi
+				)
+				$(
 					if [ "$addition" = "udp" ] ; then
-						echo "meta nfproto ipv4 udp $ext_args counter meta mark set 1"
+						echo "udp dport 0-65535 ip daddr @$IPSET_DST_PROXY_V4 counter meta mark set 1"
 						if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
-							echo "meta nfproto ipv6 udp $ext_args6 counter meta mark set 1"
+							echo "udp dport 0-65535 ip6 daddr @$IPSET_DST_PROXY_V6 counter meta mark set 1"
 						fi
 					fi
 				)
@@ -301,9 +307,6 @@ setup_transparent_proxy() {
 	process_list "proxylist" "$proxy_list_dns" "$IPSET_DST_PROXY_V4" "$set6_proxy"
 	process_list "gfwlist" "$proxy_list_dns" "$IPSET_DST_PROXY_V4" "$set6_proxy"
 
-	local ext_args="ip daddr @$IPSET_DST_PROXY_V4"
-	local ext_args6="ip6 daddr @$IPSET_DST_PROXY_V6"
-
 	# 更新 dnsmasq 配置（原子操作覆盖，防止服务重载时读取到残缺文件）
 	if [ -s "$FILE_V2RAY_DNSMASQ_CACHE" ] && grep -q -v -E "^$|^#" "$FILE_V2RAY_DNSMASQ_CACHE" 2>/dev/null ; then
 		local dir="$(dirname "$FILE_V2RAY_DNSMASQ")"
@@ -326,7 +329,7 @@ setup_transparent_proxy() {
 		lan_devices=$(echo "$lan_devices" | tr -s ' ' '\n' | sort -u)
 	fi
 	
-	add_v2ray_nftables_tproxy_rules "$ext_args" "$ext_args6" "$lan_devices"
+	add_v2ray_nftables_tproxy_rules "$lan_devices"
 }
 
 start_instance() {
