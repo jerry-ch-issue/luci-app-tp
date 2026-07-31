@@ -1,158 +1,52 @@
 #!/bin/sh /etc/rc.common
 #
-# Copyright 2019-2020 Xingwang Liao <kuoruan@gmail.com>
-# Licensed to the public under the MIT License.
+# Custom V2Ray/Xray Init Script for OpenWrt 21.02
+# 核心架构: Firewall3 (iptables + ipset) | 纯 TProxy + 内存流处理 + 强状态机
 #
 
 START=99
 USE_PROCD=1
-
 NAME=v2ray
 
 FILE_V2RAY_DNSMASQ=/tmp/dnsmasq.d/$NAME
 FILE_V2RAY_DNSMASQ_CACHE=/tmp/$NAME.dnsmasq.cache
 
-CORE=
-CORE_VER=
+CORE=""
+CORE_VER=""
 
-IPTABLES_BIN=$(command -v iptables)
-IP6TABLES_BIN=$(command -v ip6tables)
+# OpenWrt 21.02 核心依赖二进制 (Firewall3)
+IPT_BIN=$(command -v iptables)
+IP6T_BIN=$(command -v ip6tables)
 IPSET_BIN=$(command -v ipset)
 
-
-IPSET_SRC_IGNORE_V4=v2ray_src_ignore_v4
-IPSET_SRC_IGNORE_V6=v2ray_src_ignore_v6
 IPSET_DST_PROXY_V4=v2ray_dst_proxy_v4
 IPSET_DST_PROXY_V6=v2ray_dst_proxy_v6
 IPSET_SRC_DIRECT_V4=v2ray_src_direct_v4
 IPSET_DST_DIRECT_V4=v2ray_dst_direct_v4
 IPSET_DST_DIRECT_V6=v2ray_dst_direct_v6
 
-OUTBOUND_SERVERS_V4=
-OUTBOUND_SERVERS_V6=
-
 TRANSPARENT_PROXY_EXPECTED=0
-TRANSPARENT_PROXY_PORT=
-# TRANSPARENT_PROXY_USE_TPROXY=
-TRANSPARENT_PROXY_ADDITION=
+TRANSPARENT_PROXY_PORT=""
+TRANSPARENT_PROXY_ADDITION=""
 TRANSPARENT_PROXY_IPV6=0
-EXCLUDED_TCP_PORT=
-EXCLUDED_UDP_PORT=
 DNSMASQ_RESTART_EXPECTED=0
 
-. /usr/share/libubox/jshn.sh
-
+# ==============================================================================
+# 模块：可观测性日志引擎 (A级)
+# ==============================================================================
 _log() {
-	local level="$1" ; shift
+	local sys_lvl="$1"; shift
+	local out_lvl="$1"; shift
+	local module="$1"; shift
 	local msg="$@"
-	logger -p "daemon.$level" -t "$NAME" "$msg"
-
-	echo "[$level] $msg" >&2
+	logger -p "daemon.$sys_lvl" -t "$NAME" "[$module] $msg"
+	local ts=$(date +"%Y-%m-%d %H:%M:%S")
+	echo "[$ts] [$out_lvl] [$module] $msg" >&2
 }
 
-_info() {
-	_log "info" $@
-}
-
-_err() {
-	_log "err" $@
-}
-
-get_value_from_json() {
-	local json="$1"
-	local key="$2"
-
-	test -n "$json" || return
-
-	local value=""
-
-	local old_ns
-	json_set_namespace "json_key" old_ns
-	json_load "$json"
-	json_get_var "$key" value
-	json_cleanup
-	json_set_namespace "$old_ns"
-
-	echo "$value"
-}
-
-get_commands_from_json() {
-	local json="$1"
-
-	test -n "$json" || return
-
-	jshn -r "$json" 2>/dev/null | grep -v "json_init"
-}
-
-get_file_content() {
-	local filename="$1"
-
-	test -n "$filename" || return
-	test -r "/etc/v2ray/${filename}.txt" || return
-
-	cat "/etc/v2ray/${filename}.txt" | grep -v "^$" | grep -v "^#"
-}
-
-append_server_ipv4() {
-	local addr="$1"
-
-	test -n "$addr" || return
-
-	if [ -z "$OUTBOUND_SERVERS_V4" ] ; then
-		OUTBOUND_SERVERS_V4="$addr"
-	else
-		local ipa
-		for ipa in $OUTBOUND_SERVERS_V4 ; do
-			if [ "$addr" = "$ipa" ] ; then
-				return
-			fi
-		done
-
-		OUTBOUND_SERVERS_V4="$(cat >&1 <<-EOF
-			$OUTBOUND_SERVERS_V4
-			$addr
-		EOF
-		)"
-	fi
-}
-
-append_server_ipv6() {
-	local addr="$1"
-
-	test -n "$addr" || return
-
-	if [ -z "$OUTBOUND_SERVERS_V6" ] ; then
-		OUTBOUND_SERVERS_V6="$addr"
-	else	
-		local ipa
-		for ipa in $OUTBOUND_SERVERS_V6 ; do
-			if [ "$addr" = "$ipa" ] ; then
-				return
-			fi
-		done
-		OUTBOUND_SERVERS_V6="$(cat >&1 <<-EOF
-			$OUTBOUND_SERVERS_V6
-			$addr
-		EOF
-		)"
-	fi
-}
-
-append_server_address() {
-	local addr="$1"
-
-	test -n "$addr" || return
-
-	local ipv4
-	for ipv4 in $(resolveip -4 -t 5 "$addr") ; do
-		append_server_ipv4 "$ipv4"
-	done
-
-	local ipv6
-	for ipv6 in $(resolveip -6 -t 5 "$addr") ; do
-		append_server_ipv6 "$ipv6"
-	done
-}
+_info() { _log "info"    "INFO"  "$1" "$2"; }
+_warn() { _log "warning" "WARN"  "$1" "$2"; }
+_err()  { _log "err"     "ERROR" "$1" "$2"; }
 
 v2ray_section_validate() {
 	uci_validate_section "$NAME" "v2ray" "$1" \
@@ -162,427 +56,312 @@ v2ray_section_validate() {
 		'config_file:file'
 }
 
-
-add_v2ray_iptables_tproxy_rules() {
-	local ext_args="$1"
-	local ext_args6="$2"
-	local lan_devices="$3"
-	local port="$TRANSPARENT_PROXY_PORT"
-	local addition="$TRANSPARENT_PROXY_ADDITION"
-
-	test -n "$port" || return
-
-	ip rule add fwmark 1 table 100
-	ip route add local default dev lo table 100
-	if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
-		ip -6 rule add fwmark 1 table 100
-		ip -6 route add local default dev lo table 100
-	fi
-
-	$IPTABLES_BIN -t mangle -N V2RAY 2>/dev/null
-	$IPTABLES_BIN -t mangle -N V2RAY_MASK 2>/dev/null
-	$IPTABLES_BIN -t mangle -F V2RAY
-	$IPTABLES_BIN -t mangle -F V2RAY_MASK
-	$IPTABLES_BIN -t mangle -D PREROUTING -j V2RAY 2>/dev/null
-	$IPTABLES_BIN -t mangle -D OUTPUT -j V2RAY_MASK 2>/dev/null
-	$IPTABLES_BIN -t mangle -A PREROUTING -j V2RAY
-	$IPTABLES_BIN -t mangle -A OUTPUT -j V2RAY_MASK
-
-	$IPTABLES_BIN -t mangle -A V2RAY -m mark --mark 0xff -j RETURN
-	$IPTABLES_BIN -t mangle -A V2RAY -m set --match-set $IPSET_DST_DIRECT_V4 dst -j RETURN
-	$IPTABLES_BIN -t mangle -A V2RAY -m set --match-set $IPSET_SRC_DIRECT_V4 src -j RETURN
-	for device in $lan_devices ; do
-		$IPTABLES_BIN -t mangle -A V2RAY -i "$device" -p tcp $ext_args -j TPROXY --on-port "$port" --tproxy-mark 0x1/0x1
-		if [ "$addition" = "udp" ] ; then
-			$IPTABLES_BIN -t mangle -A V2RAY -i "$device" -p udp $ext_args -j TPROXY --on-port "$port" --tproxy-mark 0x1/0x1
-		fi
-	done
-
-	$IPTABLES_BIN -t mangle -A V2RAY_MASK -m mark --mark 0xff -j RETURN
-	for etp in $EXCLUDED_TCP_PORT ; do
-		$IPTABLES_BIN -t mangle -A V2RAY_MASK -p tcp --sport "$etp" -j RETURN
-	done
-	for eup in $EXCLUDED_UDP_PORT ; do
-		$IPTABLES_BIN -t mangle -A V2RAY_MASK -p udp --sport "$eup" -j RETURN
-	done
-	$IPTABLES_BIN -t mangle -A V2RAY_MASK -m set --match-set $IPSET_DST_DIRECT_V4 dst -j RETURN
-	$IPTABLES_BIN -t mangle -A V2RAY_MASK -m set --match-set $IPSET_SRC_DIRECT_V4 src -j RETURN
-	$IPTABLES_BIN -t mangle -A V2RAY_MASK -p tcp $ext_args -j MARK --set-mark 1
-	if [ "$addition" = "udp" ] ; then
-		$IPTABLES_BIN -t mangle -A V2RAY_MASK -p udp $ext_args -j MARK --set-mark 1
-	fi
-
-	if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] && [ -n "$IP6TABLES_BIN" ] ; then
-		$IP6TABLES_BIN -t mangle -N V2RAY6 2>/dev/null
-		$IP6TABLES_BIN -t mangle -N V2RAY6_MASK 2>/dev/null
-		$IP6TABLES_BIN -t mangle -F V2RAY6
-		$IP6TABLES_BIN -t mangle -F V2RAY6_MASK
-		$IP6TABLES_BIN -t mangle -D PREROUTING -j V2RAY6 2>/dev/null
-		$IP6TABLES_BIN -t mangle -D OUTPUT -j V2RAY6_MASK 2>/dev/null
-		$IP6TABLES_BIN -t mangle -A PREROUTING -j V2RAY6
-		$IP6TABLES_BIN -t mangle -A OUTPUT -j V2RAY6_MASK
-
-		$IP6TABLES_BIN -t mangle -A V2RAY6 -m mark --mark 0xff -j RETURN
-		$IP6TABLES_BIN -t mangle -A V2RAY6 -m set --match-set $IPSET_DST_DIRECT_V6 dst -j RETURN
-		for device in $lan_devices ; do
-			$IP6TABLES_BIN -t mangle -A V2RAY6 -i "$device" -p tcp $ext_args6 -j TPROXY --on-port "$port" --tproxy-mark 0x1/0x1
-			if [ "$addition" = "udp" ] ; then
-				$IP6TABLES_BIN -t mangle -A V2RAY6 -i "$device" -p udp $ext_args6 -j TPROXY --on-port "$port" --tproxy-mark 0x1/0x1
-			fi
-		done
-
-		$IP6TABLES_BIN -t mangle -A V2RAY6_MASK -m mark --mark 0xff -j RETURN
-		for etp in $EXCLUDED_TCP_PORT ; do
-			$IP6TABLES_BIN -t mangle -A V2RAY6_MASK -p tcp --sport "$etp" -j RETURN
-		done
-		for eup in $EXCLUDED_UDP_PORT ; do
-			$IP6TABLES_BIN -t mangle -A V2RAY6_MASK -p udp --sport "$eup" -j RETURN
-		done
-		$IP6TABLES_BIN -t mangle -A V2RAY6_MASK -m set --match-set $IPSET_DST_DIRECT_V6 dst -j RETURN
-		$IP6TABLES_BIN -t mangle -A V2RAY6_MASK -p tcp $ext_args6 -j MARK --set-mark 1
-		if [ "$addition" = "udp" ] ; then
-			$IP6TABLES_BIN -t mangle -A V2RAY6_MASK -p udp $ext_args6 -j MARK --set-mark 1
-		fi
-	fi
-}
-
-
+# ==============================================================================
+# 模块：环境幂等性清理 (fw3 专属适配)
+# 边界防御：fw3 需要精确解绑 Mangle 表中的 PREROUTING/OUTPUT 钩子。
+# 使用严格统一的 table 100 语法，兼容极简版 Busybox ip 模块。
+# ==============================================================================
 clear_v2ray_rules() {
-	$IPTABLES_BIN -t mangle -D PREROUTING -j V2RAY 2>/dev/null
-	$IPTABLES_BIN -t mangle -D OUTPUT -j V2RAY_MASK 2>/dev/null
-	$IPTABLES_BIN -t mangle -F V2RAY 2>/dev/null
-	$IPTABLES_BIN -t mangle -F V2RAY_MASK 2>/dev/null
-	$IPTABLES_BIN -t mangle -X V2RAY 2>/dev/null
-	$IPTABLES_BIN -t mangle -X V2RAY_MASK 2>/dev/null
-
-	if [ -n "$IP6TABLES_BIN" ] ; then
-		$IP6TABLES_BIN -t mangle -D PREROUTING -j V2RAY6 2>/dev/null
-		$IP6TABLES_BIN -t mangle -D OUTPUT -j V2RAY6_MASK 2>/dev/null
-		$IP6TABLES_BIN -t mangle -F V2RAY6 2>/dev/null
-		$IP6TABLES_BIN -t mangle -F V2RAY6_MASK 2>/dev/null
-		$IP6TABLES_BIN -t mangle -X V2RAY6 2>/dev/null
-		$IP6TABLES_BIN -t mangle -X V2RAY6_MASK 2>/dev/null
-	fi
-
-	for set_name in \
-		$IPSET_SRC_IGNORE_V4 $IPSET_SRC_IGNORE_V6 $IPSET_DST_PROXY_V4 $IPSET_DST_PROXY_V6 \
-		$IPSET_SRC_DIRECT_V4 $IPSET_DST_DIRECT_V4 $IPSET_DST_DIRECT_V6 ; do
-		$IPSET_BIN destroy "$set_name" 2>/dev/null
+	_info "SYSTEM" "Flushing iptables/ip6tables and ipset rules..."
+	
+	# IPv4 钩子解绑与自定义链销毁
+	while $IPT_BIN -t mangle -D PREROUTING -j V2RAY_DIVERT 2>/dev/null; do true; done
+	while $IPT_BIN -t mangle -D OUTPUT -j V2RAY_OUTPUT 2>/dev/null; do true; done
+	
+	for chain in V2RAY_DIVERT V2RAY_RULES V2RAY_OUTPUT; do
+		$IPT_BIN -t mangle -F $chain 2>/dev/null
+		$IPT_BIN -t mangle -X $chain 2>/dev/null
 	done
 
-	while ip rule del fwmark 1 lookup 100 2>/dev/null ; do true ; done
-	while ip -6 rule del fwmark 1 lookup 100 2>/dev/null ; do true ; done
+	# IPv6 钩子解绑与自定义链销毁
+	if [ -n "$IP6T_BIN" ]; then
+		while $IP6T_BIN -t mangle -D PREROUTING -j V2RAY_DIVERT 2>/dev/null; do true; done
+		while $IP6T_BIN -t mangle -D OUTPUT -j V2RAY_OUTPUT 2>/dev/null; do true; done
+		
+		for chain in V2RAY_DIVERT V2RAY_RULES V2RAY_OUTPUT; do
+			$IP6T_BIN -t mangle -F $chain 2>/dev/null
+			$IP6T_BIN -t mangle -X $chain 2>/dev/null
+		done
+	fi
+
+	# 统一清理路由规则 (解决 Busybox lookup 与 table 语法歧义)
+	while ip rule del fwmark 1 table 100 2>/dev/null ; do true ; done
+	while ip -6 rule del fwmark 1 table 100 2>/dev/null ; do true ; done
 	ip route flush table 100 2>/dev/null
 	ip -6 route flush table 100 2>/dev/null
 	ip route del local 0.0.0.0/0 dev lo table 100 2>/dev/null
 	ip -6 route del local ::/0 dev lo table 100 2>/dev/null
+
+	# 销毁 IPSet 集合
+	for setname in $IPSET_DST_PROXY_V4 $IPSET_DST_PROXY_V6 $IPSET_SRC_DIRECT_V4 $IPSET_DST_DIRECT_V4 $IPSET_DST_DIRECT_V6; do
+		$IPSET_BIN destroy $setname 2>/dev/null
+	done
 }
 
+clear_transparent_proxy() {
+	clear_v2ray_rules
+	if [ -f "$FILE_V2RAY_DNSMASQ" ] ; then
+		_info "CLEANUP" "Purging legacy Dnsmasq rules."
+		rm -f "$FILE_V2RAY_DNSMASQ"
+		DNSMASQ_RESTART_EXPECTED=1
+	fi
+}
 
+# ==============================================================================
+# 模块：IPSet 集合分配与内存回收 (Timeout 机制)
+# 核心防御：追加 -! 标识忽略已存在报错。开启 7天 timeout 防止内存无限膨胀。
+# ==============================================================================
 create_v2ray_ipset() {
-	# https://en.wikipedia.org/wiki/Reserved_IP_addresses
-	local reserved_v4="$(cat >&1 <<-EOF
-		0.0.0.0/8
-		10.0.0.0/8
-		100.64.0.0/10
-		127.0.0.0/8
-		169.254.0.0/16
-		172.16.0.0/12
-		192.0.0.0/24
-		192.0.2.0/24
-		192.88.99.0/24
-		192.168.0.0/16
-		192.18.0.0/15
-		198.51.100.0/24
-		203.0.113.0/24
-		224.0.0.0/4
-		240.0.0.0/4
-		255.255.255.255
-	EOF
-	)"
-
-	local reserved_v6="$(cat >&1 <<-EOF
-		::
-		::/128
-		::1/128
-		::ffff:0:0/96
-		::ffff:0:0:0/96
-		64:ff9b::/96
-		100::/64
-		2001::/32
-		2001:20::/28
-		2001:db8::/32
-		2002::/16
-		fc00::/7
-		fe80::/10
-		ff00::/8
-	EOF
-	)"
-
-	$IPSET_BIN create $IPSET_DST_DIRECT_V4 hash:net family inet -exist
-	$IPSET_BIN create $IPSET_SRC_DIRECT_V4 hash:net family inet -exist
-	$IPSET_BIN create $IPSET_DST_PROXY_V4 hash:net family inet timeout 604800 -exist
-	$IPSET_BIN create $IPSET_DST_DIRECT_V6 hash:net family inet6 -exist
-	$IPSET_BIN create $IPSET_DST_PROXY_V6 hash:net family inet6 timeout 604800 -exist
-
-	local item
-	for item in $reserved_v4 $OUTBOUND_SERVERS_V4 ; do
-		$IPSET_BIN add $IPSET_DST_DIRECT_V4 "$item" -exist
-	done
-	for item in $reserved_v6 $OUTBOUND_SERVERS_V6 ; do
-		$IPSET_BIN add $IPSET_DST_DIRECT_V6 "$item" -exist
-	done
+	local reserved_v4="
+		0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8
+		169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24
+		192.88.99.0/24 192.168.0.0/16 192.18.0.0/15 198.51.100.0/24
+		203.0.113.0/24 224.0.0.0/4 240.0.0.0/4 255.255.255.255
+	"
+	local reserved_v6="
+		::1/128 ::ffff:0:0/96 ::ffff:0:0:0/96 64:ff9b::/96
+		100::/64 2001::/32 2001:20::/28 2001:db8::/32
+		2002::/16 fc00::/7 fe80::/10 ff00::/8
+	"
+	# [S+级优化]: 利用代码块将创建指令与硬编码 IP 添加指令拼装成一股数据流，
+	# 仅需 1 次 ipset restore 进程调用即可完成内核结构的整体初始化。
+	{
+		echo "create $IPSET_DST_DIRECT_V4 hash:net family inet hashsize 1024 maxelem 65536 timeout 604800"
+		echo "create $IPSET_SRC_DIRECT_V4 hash:net family inet hashsize 1024 maxelem 65536"
+		echo "create $IPSET_DST_PROXY_V4 hash:net family inet hashsize 1024 maxelem 65536 timeout 604800"
+		echo "create $IPSET_DST_DIRECT_V6 hash:net family inet6 hashsize 1024 maxelem 65536 timeout 604800"
+		echo "create $IPSET_DST_PROXY_V6 hash:net family inet6 hashsize 1024 maxelem 65536 timeout 604800"
+		
+		for ip in $reserved_v4; do
+			echo "add $IPSET_DST_DIRECT_V4 $ip timeout 0"
+		done
+		for ip6 in $reserved_v6; do
+			echo "add $IPSET_DST_DIRECT_V6 $ip6 timeout 0"
+		done
+	} | $IPSET_BIN -! restore 2>/dev/null
 }
 
+# ==============================================================================
+# 模块：流处理注入引擎 (Ipset 高性能适配版)
+# ==============================================================================
+process_list() {
+	local listname="$1"
+	local dns_server="$2"
+	local set4="$3"
+	local set6="$4"
+	local filepath="/etc/v2ray/${listname}.txt"
 
-init_rules_for_listfile() {
-	local direct_list_dns="$1"
-	local proxy_list_dns="$2"
+	test -r "$filepath" || return
+	_info "PARSER" "Processing routing list: $listname.txt"
 
-	echo "# AUTO-GENERATED FILE. DO NOT MODIFY." >"$FILE_V2RAY_DNSMASQ_CACHE"
+	local tmp_ipset="/tmp/v2ray_ipset_${listname}.txt"
 
-	# For direct list
-	local direct_content
-	direct_content="$(get_file_content "directlist")"
+	awk -v dns="$dns_server" -v s4="$set4" -v s6="$set6" -v d_file="$FILE_V2RAY_DNSMASQ_CACHE" \
+	    -v f_ipset="$tmp_ipset" '
+	{
+		sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, "");
+		if ($0 == "" || $0 ~ /^#/) next;
 
-	if [ -n "$direct_content" ] ; then
-		if [ -n "$direct_list_dns" ] ; then
-			echo "$direct_content" | \
-				grep -oE "([0-9a-zA-Z_-]+\.)+[a-zA-Z]{2,}$" | \
-				sed "s|.*|server=/&/$direct_list_dns\nipset=/&/$IPSET_DST_DIRECT_V4,$IPSET_DST_DIRECT_V6|" \
-				>>"$FILE_V2RAY_DNSMASQ_CACHE"
-		else
-			echo "$direct_content" | \
-				grep -oE "([0-9a-zA-Z_-]+\.)+[a-zA-Z]{2,}$" | \
-				sed "s|.*|ipset=/&/$IPSET_DST_DIRECT_V4,$IPSET_DST_DIRECT_V6|" \
-				>>"$FILE_V2RAY_DNSMASQ_CACHE"
-		fi
-		local direct_v4=$(echo "$direct_content" | grep -oE "[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?" )
-		local direct_v6=$(echo "$direct_content" | grep -oE "([0-9a-fA-F]{0,4}:){1,7}([0-9a-fA-F]){0,4}(/[0-9]{1,2})?" )
-		if [ -n "$direct_v4" ] ; then
-			for cidr in $direct_v4 ; do $IPSET_BIN add $IPSET_DST_DIRECT_V4 "$cidr" -exist ; done
-		fi
-		if [ -n "$direct_v6" ] ; then
-			for cidr in $direct_v6 ; do $IPSET_BIN add $IPSET_DST_DIRECT_V6 "$cidr" -exist ; done
-		fi
+		# IPv4 文本直写 IP，赋予 timeout 0 免疫清理
+		if ($0 ~ /^[0-9]{1,3}(\.[0-9]{1,3}){3}(\/[0-9]{1,2})?$/) {
+			if (s4 != "") print "add " s4 " " $0 " timeout 0" > f_ipset
+		}
+		# IPv6 文本直写 IP，赋予 timeout 0 免疫清理
+		else if ($0 ~ /^[a-fA-F0-9:]+(\/[0-9]{1,3})?$/ && index($0, ":") > 0) {
+			if (s6 != "") print "add " s6 " " $0 " timeout 0" > f_ipset
+		}
+		# 合规域名：利用 Dnsmasq 解析，所查 IP 自动继承集合的 7 天倒计时
+		else if ($0 ~ /^([0-9a-zA-Z_-]+\.)+[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]$/) {
+			if (dns != "") print "server=/" $0 "/" dns >> d_file
+			
+			if (s4 != "" && s6 != "") {
+				print "ipset=/" $0 "/" s4 "," s6 >> d_file
+			} else if (s4 != "") {
+				print "ipset=/" $0 "/" s4 >> d_file
+			} else if (s6 != "") {
+				print "ipset=/" $0 "/" s6 >> d_file
+			}
+		}
+	}' "$filepath"
+
+	# [致命Bug修复]: -! 强制忽略元素冲突错误，防止 gfwlist 内包含重复 IP 导致整盘挂载崩溃
+	if [ -s "$tmp_ipset" ]; then
+		cat "$tmp_ipset" 2>/dev/null | $IPSET_BIN -! restore 2>/dev/null
 	fi
+	rm -f "$tmp_ipset"
+}
 
-	# For proxy list
-	local proxy_content
-	proxy_content="$(get_file_content "proxylist")"
+# ==============================================================================
+# 模块：Iptables 透明代理防火墙钩子 (TProxy Hooks)
+# 架构解析：全面接管 PREROUTING 与 OUTPUT 链。
+# TPROXY target 直接交接流量；打 mark 利用路由表 100 环回给 TProxy。
+# ==============================================================================
+add_v2ray_iptables_tproxy_rules() {
+	local lan_devices="$1"
+	local port="$TRANSPARENT_PROXY_PORT"
+	local addition="$TRANSPARENT_PROXY_ADDITION"
 	
-	if [ -n "$proxy_content" ] ; then
-		if [ -n "$proxy_list_dns" ] ; then
-			echo "$proxy_content" | \
-				grep -oE "([0-9a-zA-Z_-]+\.)+[a-zA-Z]{2,}$" | \
-				sed "s|.*|server=/&/$proxy_list_dns\nipset=/&/$IPSET_DST_PROXY_V4,$IPSET_DST_PROXY_V6|" \
-				>>"$FILE_V2RAY_DNSMASQ_CACHE"
-		else
-			echo "$proxy_content" | \
-				grep -oE "([0-9a-zA-Z_-]+\.)+[a-zA-Z]{2,}$" | \
-				sed "s|.*|ipset=/&/$IPSET_DST_PROXY_V4,$IPSET_DST_PROXY_V6|" \
-				>>"$FILE_V2RAY_DNSMASQ_CACHE"
-		fi
-		local proxy_v4=$(echo "$proxy_content" | grep -oE "[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?" )
-		local proxy_v6=$(echo "$proxy_content" | grep -oE "([0-9a-fA-F]{0,4}:){1,7}([0-9a-fA-F]){0,4}(/[0-9]{1,2})?" )
-		if [ -n "$proxy_v4" ] ; then
-			for cidr in $proxy_v4 ; do
-				$IPSET_BIN add $IPSET_DST_PROXY_V4 "$cidr" timeout 87091200 -exist
-			done
-		fi
-		if [ -n "$proxy_v6" ] ; then
-			for cidr in $proxy_v6 ; do
-				$IPSET_BIN add $IPSET_DST_PROXY_V6 "$cidr" timeout 87091200 -exist
-			done
-		fi
-	fi
-  # For local devices outbound list
-	local src_content
-	src_content="$(get_file_content "srcdirectlist")"
+	test -n "$port" || return
 
-	if [ -n "$src_content" ] ; then
-		local src_v4=$(echo "$src_content" | grep -oE "[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?")
-		if [ -n "$src_v4" ] ; then
-			for cidr in $src_v4 ; do
-				$IPSET_BIN add $IPSET_SRC_DIRECT_V4 "$cidr" -exist
+	ip rule add fwmark 1 table 100
+	ip route add local 0.0.0.0/0 dev lo table 100
+	if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+		ip -6 rule add fwmark 1 table 100
+		ip -6 route add local ::/0 dev lo table 100
+	fi
+
+	# ----------------------------------------------------
+	# IPv4 编排 (Mangle Table)
+	# ----------------------------------------------------
+	$IPT_BIN -t mangle -N V2RAY_DIVERT
+	$IPT_BIN -t mangle -N V2RAY_RULES
+	$IPT_BIN -t mangle -N V2RAY_OUTPUT
+
+	$IPT_BIN -t mangle -A V2RAY_DIVERT -p tcp -m socket -j MARK --set-mark 1
+	$IPT_BIN -t mangle -A V2RAY_DIVERT -p tcp -m socket -j ACCEPT
+	if [ -n "$lan_devices" ]; then
+		for device in $lan_devices; do
+			[ -n "$device" ] && $IPT_BIN -t mangle -A V2RAY_DIVERT -i "$device" -j V2RAY_RULES
+		done
+	fi
+	$IPT_BIN -t mangle -A V2RAY_DIVERT -m mark --mark 1 -j V2RAY_RULES
+
+	$IPT_BIN -t mangle -A V2RAY_RULES -m mark --mark 0xff -j RETURN
+	$IPT_BIN -t mangle -A V2RAY_RULES -m set --match-set $IPSET_DST_DIRECT_V4 dst -j RETURN
+	$IPT_BIN -t mangle -A V2RAY_RULES -m set --match-set $IPSET_SRC_DIRECT_V4 src -j RETURN
+	$IPT_BIN -t mangle -A V2RAY_RULES -p tcp -m set --match-set $IPSET_DST_PROXY_V4 dst -j TPROXY --on-port $port --tproxy-mark 1
+	if [ "$addition" = "udp" ]; then
+		$IPT_BIN -t mangle -A V2RAY_RULES -p udp -m set --match-set $IPSET_DST_PROXY_V4 dst -j TPROXY --on-port $port --tproxy-mark 1
+	fi
+
+	$IPT_BIN -t mangle -A V2RAY_OUTPUT -m mark --mark 0xff -j ACCEPT
+	$IPT_BIN -t mangle -A V2RAY_OUTPUT -m set --match-set $IPSET_DST_DIRECT_V4 dst -j ACCEPT
+	$IPT_BIN -t mangle -A V2RAY_OUTPUT -m set --match-set $IPSET_SRC_DIRECT_V4 src -j ACCEPT
+	$IPT_BIN -t mangle -A V2RAY_OUTPUT -p tcp -m set --match-set $IPSET_DST_PROXY_V4 dst -j MARK --set-mark 1
+	if [ "$addition" = "udp" ]; then
+		$IPT_BIN -t mangle -A V2RAY_OUTPUT -p udp -m set --match-set $IPSET_DST_PROXY_V4 dst -j MARK --set-mark 1
+	fi
+
+	$IPT_BIN -t mangle -I PREROUTING -j V2RAY_DIVERT
+	$IPT_BIN -t mangle -I OUTPUT -j V2RAY_OUTPUT
+
+	# ----------------------------------------------------
+	# IPv6 编排 (Mangle Table)
+	# ----------------------------------------------------
+	if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] && [ -n "$IP6T_BIN" ] ; then
+		$IP6T_BIN -t mangle -N V2RAY_DIVERT
+		$IP6T_BIN -t mangle -N V2RAY_RULES
+		$IP6T_BIN -t mangle -N V2RAY_OUTPUT
+
+		$IP6T_BIN -t mangle -A V2RAY_DIVERT -p tcp -m socket -j MARK --set-mark 1
+		$IP6T_BIN -t mangle -A V2RAY_DIVERT -p tcp -m socket -j ACCEPT
+		if [ -n "$lan_devices" ]; then
+			for device in $lan_devices; do
+				[ -n "$device" ] && $IP6T_BIN -t mangle -A V2RAY_DIVERT -i "$device" -j V2RAY_RULES
 			done
 		fi
+		$IP6T_BIN -t mangle -A V2RAY_DIVERT -m mark --mark 1 -j V2RAY_RULES
+
+		$IP6T_BIN -t mangle -A V2RAY_RULES -m mark --mark 0xff -j RETURN
+		$IP6T_BIN -t mangle -A V2RAY_RULES -m set --match-set $IPSET_DST_DIRECT_V6 dst -j RETURN
+		$IP6T_BIN -t mangle -A V2RAY_RULES -p tcp -m set --match-set $IPSET_DST_PROXY_V6 dst -j TPROXY --on-port $port --tproxy-mark 1
+		if [ "$addition" = "udp" ]; then
+			$IP6T_BIN -t mangle -A V2RAY_RULES -p udp -m set --match-set $IPSET_DST_PROXY_V6 dst -j TPROXY --on-port $port --tproxy-mark 1
+		fi
+
+		$IP6T_BIN -t mangle -A V2RAY_OUTPUT -m mark --mark 0xff -j ACCEPT
+		$IP6T_BIN -t mangle -A V2RAY_OUTPUT -m set --match-set $IPSET_DST_DIRECT_V6 dst -j ACCEPT
+		$IP6T_BIN -t mangle -A V2RAY_OUTPUT -p tcp -m set --match-set $IPSET_DST_PROXY_V6 dst -j MARK --set-mark 1
+		if [ "$addition" = "udp" ]; then
+			$IP6T_BIN -t mangle -A V2RAY_OUTPUT -p udp -m set --match-set $IPSET_DST_PROXY_V6 dst -j MARK --set-mark 1
+		fi
+
+		$IP6T_BIN -t mangle -I PREROUTING -j V2RAY_DIVERT
+		$IP6T_BIN -t mangle -I OUTPUT -j V2RAY_OUTPUT
 	fi
 }
 
 gracefully_restart_dnsmasq() {
 	if [ "x$DNSMASQ_RESTART_EXPECTED" = "x1" ] && [ -x "/etc/init.d/dnsmasq" ] ; then
-		_info "Restarting dnsmasq..."
+		_info "DNSMASQ" "Restarting Dnsmasq to apply routing updates..."
 		/etc/init.d/dnsmasq restart >/dev/null 2>&1
 		DNSMASQ_RESTART_EXPECTED=0
 	fi
 }
-
-
-
-
-
-
-
 
 init_transparent_proxy() {
 	local tp_cfg="main_transparent_proxy"
 	local redirect_port redirect_udp ipv6_tproxy
 
 	config_get redirect_port "$tp_cfg" "redirect_port"
-# 	config_get_bool use_tproxy "$tp_cfg" "use_tproxy" "0"
 	config_get_bool redirect_udp "$tp_cfg" "redirect_udp" "0"
 	config_get_bool ipv6_tproxy "$tp_cfg" "ipv6_tproxy" "0"
-	if [ -n "$redirect_port" ] && \
-		! validate_data "port" "$redirect_port" 2>/dev/null ; then
-		_err "Transparent proxy redirect port is invalid: $redirect_port"
+	
+	if [ -n "$redirect_port" ] && ! validate_data "port" "$redirect_port" 2>/dev/null ; then
+		_err "CONFIG" "Invalid transparent proxy port parameter: ${redirect_port}"
 		return 1
 	fi
 
 	TRANSPARENT_PROXY_PORT="$redirect_port"
-# 	TRANSPARENT_PROXY_USE_TPROXY="$use_tproxy"
 	TRANSPARENT_PROXY_IPV6="$ipv6_tproxy"
-
-	if [ "x$redirect_udp" = "x1" ] ; then
-		TRANSPARENT_PROXY_ADDITION="udp"
-	else
-		TRANSPARENT_PROXY_ADDITION=
-	fi
+	TRANSPARENT_PROXY_ADDITION=$( [ "x$redirect_udp" = "x1" ] && echo "udp" || echo "" )
 }
 
 setup_transparent_proxy() {
-	if [ -z "$TRANSPARENT_PROXY_PORT" ] ; then
-		_info "Transparent proxy disabled."
+	if [ -z "$TRANSPARENT_PROXY_PORT" ] || [ "x$TRANSPARENT_PROXY_EXPECTED" != "x1" ] ; then
+		_warn "TPROXY" "Prerequisites unmet. Bypassing transparent proxy setup."
 		return 0
 	fi
-
-	if [ "x$TRANSPARENT_PROXY_EXPECTED" != "x1" ] ; then
-		_info "No v2ray instance enabled, skip transparent proxy."
-		return 0
-	fi
-
-	_info "Setting transparent proxy on port: $TRANSPARENT_PROXY_PORT"
-
-
 
 	local tp_cfg="main_transparent_proxy"
-	local lan_ifaces only_privileged_ports proxy_mode direct_list_dns proxy_list_dns
-	local excluded_tcp_port excluded_udp_port
+	local lan_ifaces direct_list_dns proxy_list_dns
 
 	config_get lan_ifaces "$tp_cfg" "lan_ifaces"
-	config_get_bool only_privileged_ports "$tp_cfg" "only_privileged_ports" "0"
-	config_get proxy_mode "$tp_cfg" "proxy_mode"
 	config_get direct_list_dns "$tp_cfg" "direct_list_dns"
 	config_get proxy_list_dns "$tp_cfg" "proxy_list_dns"
-	config_get EXCLUDED_TCP_PORT "$tp_cfg" "excluded_tcp_port"
-	config_get EXCLUDED_UDP_PORT "$tp_cfg" "excluded_udp_port"
 
-	test -n "$EXCLUDED_TCP_PORT" && \
-		_info "Unproxied tcp port(s): $EXCLUDED_TCP_PORT"
-	
-	test -n "$EXCLUDED_UDP_PORT" && \
-		_info "Unproxied udp port(s): $EXCLUDED_UDP_PORT"
+	_info "TPROXY" "Activating Iptables Transparent Engine on port [${TRANSPARENT_PROXY_PORT}]"
 
-	_info "Transparent proxy mode: $proxy_mode"
-			create_v2ray_ipset
-	init_rules_for_listfile "$direct_list_dns" "$proxy_list_dns"
+	create_v2ray_ipset
 
-	local ext_args
-	local ext_args6
-	case "${proxy_mode:-gfwlist_proxy}" in
-		"gfwlist_proxy")
-			local gfwlist="$(get_file_content "gfwlist")"
-			if [ -n "$gfwlist" ] ; then
-				if [ -n "$proxy_list_dns" ] ; then
-					echo "$gfwlist" | \
-						sed "s|.*|server=/&/$proxy_list_dns\nipset=/&/$IPSET_DST_PROXY_V4,$IPSET_DST_PROXY_V6|" \
-						>> "$FILE_V2RAY_DNSMASQ_CACHE"
-				else
-					echo "$gfwlist" | \
-						sed "s|.*|ipset=/&/$IPSET_DST_PROXY_V4,$IPSET_DST_PROXY_V6|" \
-						>> "$FILE_V2RAY_DNSMASQ_CACHE"
-				fi
-				ext_args="-m set --match-set $IPSET_DST_PROXY_V4 dst"
-				ext_args6="-m set --match-set $IPSET_DST_PROXY_V6 dst"
-			else
-				ext_args=
-				ext_args6=
-			fi
-			;;
-		*)
-			_info "Unsupported proxy mode '$proxy_mode', fallback to global mode."
-			ext_args=
-			ext_args6=
-			;;
-	esac
-
-	if [ "x$only_privileged_ports" = "x1" ] ; then
-			ext_args="--dport 0:1023 $ext_args"
-			ext_args6="--dport 0:1023 $ext_args6"
-	else
-			ext_args="--dport 0:65535 $ext_args"
-			ext_args6="--dport 0:65535 $ext_args6"
+	local set6_proxy=""
+	local set6_direct=""
+	if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+		set6_proxy="$IPSET_DST_PROXY_V6"
+		set6_direct="$IPSET_DST_DIRECT_V6"
 	fi
 
-	if [ -n "$(cat "$FILE_V2RAY_DNSMASQ_CACHE" | grep -v "^$" | grep -v "^#")" ] ; then
-			local dir="$(dirname "$FILE_V2RAY_DNSMASQ")"
-			test -d "$dir" || mkdir -p "$dir"
-			cat "$FILE_V2RAY_DNSMASQ_CACHE" >"$FILE_V2RAY_DNSMASQ" 2>/dev/null
+	echo "# AUTO-GENERATED FILE. DO NOT MODIFY." >"$FILE_V2RAY_DNSMASQ_CACHE"
+
+	process_list "directlist" "$direct_list_dns" "$IPSET_DST_DIRECT_V4" "$set6_direct"
+	process_list "srcdirectlist" "" "$IPSET_SRC_DIRECT_V4" ""
+	process_list "proxylist" "$proxy_list_dns" "$IPSET_DST_PROXY_V4" "$set6_proxy"
+	process_list "gfwlist" "$proxy_list_dns" "$IPSET_DST_PROXY_V4" "$set6_proxy"
+
+	# 原子操作更新 DNSMasq
+	if [ -f "$FILE_V2RAY_DNSMASQ_CACHE" ]; then
+		if cmp -s "$FILE_V2RAY_DNSMASQ_CACHE" "$FILE_V2RAY_DNSMASQ" 2>/dev/null; then
+			rm -f "$FILE_V2RAY_DNSMASQ_CACHE"
+		else
+			mv -f "$FILE_V2RAY_DNSMASQ_CACHE" "$FILE_V2RAY_DNSMASQ" 2>/dev/null
 			DNSMASQ_RESTART_EXPECTED=1
+		fi
 	fi
 
-	rm -f "$FILE_V2RAY_DNSMASQ_CACHE"
-
-	local lan_devices lan_ipaddrs lan_ip6addrs
-
+	local lan_devices=""
 	if [ -n "$lan_ifaces" ] ; then
 		. /lib/functions/network.sh
-
-		local lan
+		local lan device
 		for lan in $lan_ifaces ; do
-			local device ipaddrs ipaddr ip6addrs ip6addr
 			network_get_device device "$lan"
-			network_get_ipaddrs ipaddrs "$lan"
-			network_get_ipaddrs6 ip6addrs "$lan"
-
 			if [ -n "$device" ] ; then
-				if [ -n "$lan_devices" ] ; then
-					lan_devices="$lan_devices $device"
-				else
-					lan_devices="$device"
-				fi
-			fi
-			if [ -n "$ipaddrs" ] ; then
-				for ipaddr in $ipaddrs ; do
-					if [ -n "$lan_ipaddrs" ] ; then
-						lan_ipaddrs="$ipaddr"
-					else
-						lan_ipaddrs="$lan_ipaddrs $ipaddr"
-					fi
-				done
-			fi
-			
-			if [ -n "$ip6addrs" ] ; then
-				for ip6addr in $ip6addrs; do
-					if [ -n "$lan_ip6addrs" ] ; then
-						lan_ip6addrs="$lan_ip6addrs $ip6addr"
-					else
-						lan_ip6addrs="$ip6addr"
-					fi
-				done
+				lan_devices="${lan_devices:+$lan_devices }$device"
 			fi
 		done
+		lan_devices=$(echo "$lan_devices" | tr ' ' '\n' | sort -u | tr '\n' ' ')
 	fi
-	add_v2ray_iptables_tproxy_rules "$ext_args" "$ext_args6" "$lan_devices"
-}
-
-clear_transparent_proxy() {
-	clear_v2ray_rules
-
-	if [ -s "$FILE_V2RAY_DNSMASQ" ] ; then
-		rm -f "$FILE_V2RAY_DNSMASQ"
-		DNSMASQ_RESTART_EXPECTED=1
-	fi
+	
+	add_v2ray_iptables_tproxy_rules "$lan_devices"
 }
 
 start_instance() {
@@ -590,85 +369,93 @@ start_instance() {
 	local ver_info
 	
 	if ! v2ray_section_validate "$section" ; then
-		_err "Invalid config."
+		_err "SYSTEM" "Validation failed for UCI section: $section"
 		return 1
 	fi
 
 	if [ -z "$v2ray_file" ] || [ ! -s "$v2ray_file" ] ; then
-		_err "Invalid V2Ray file."
+		_err "SYSTEM" "Missing executable payload: $v2ray_file"
 		return 1
 	fi
 
 	test -x "$v2ray_file" || chmod 755 "$v2ray_file"
 
-	ver_info="$(sh -c "$v2ray_file --version 2>/dev/null | head -n1")"
+	ver_info="$(sh -c "$v2ray_file version 2>/dev/null | head -n1")"
 	if [ -z "$ver_info" ] ; then
-		ver_info="$(sh -c "$v2ray_file version 2>/dev/null | head -n1")"
+		ver_info="$(sh -c "$v2ray_file --version 2>/dev/null | head -n1")"
 	fi
-	CORE="$(echo $ver_info | awk -F' ' '{printf $1}')"
-	CORE_VER="$(echo $ver_info | awk -F' ' '{printf $2}')"
-	uci set v2ray.main.core=$CORE
+	CORE="$(echo "$ver_info" | awk '{print $1}')"
+	CORE_VER="$(echo "$ver_info" | awk '{print $2}')"
+	
+	_info "SYSTEM" "Binary Fingerprint -> Engine: [$CORE] Version: [$CORE_VER]"
+	
+	uci set v2ray.main.core="$CORE"
 	uci commit
 
 	if [ "x$enabled" != "x1" ] ; then
-		_info "Service disabled: $section"
 		return 0
 	fi
 	
-	local temp_config
-	if [ -z "$config_file" ] ; then
-		_err "Config file is required."
+	if [ -z "$config_file" ] || [ ! -s "$config_file" ] ; then
+		_err "SYSTEM" "Configuration JSON missing or empty: $config_file"
 		return 1
 	fi
 
-	if [ ! -s "$config_file" ] ; then
-		_err "Config file not found: $config_file"
-		return 1
+	local is_v4=0
+	if [ "$CORE" = "V2Ray" ] ; then
+		local major_ver=$(echo "$CORE_VER" | cut -d'.' -f1 | grep -oE '[0-9]+')
+		if [ -n "$major_ver" ] && [ "$major_ver" -lt 5 ] 2>/dev/null ; then
+			is_v4=1
+		fi
 	fi
 
-	if ! ( eval "$v2ray_file --test --config=\"$config_file\" >/dev/null 2>&1" ) ; then
-		_err "Validate config file failed: $config_file"
-		return 1
+	if [ "$is_v4" = "1" ] ; then
+		if ! "$v2ray_file" -test -config="$config_file" >/dev/null 2>&1 ; then
+			_err "SYSTEM" "V4 kernel syntax validation failed for $config_file"
+			return 1
+		fi
+	else
+		if ! "$v2ray_file" test -c "$config_file" >/dev/null 2>&1 ; then
+			_err "SYSTEM" "V5/Xray kernel syntax validation failed for $config_file"
+			return 1
+		fi
 	fi
-
-	local file_content="$(cat "$config_file")"
-	local config_commands="$(get_commands_from_json "$file_content")"
-	local addr
-	for addr in $(echo "$config_commands" | sed -n "s/^json.*'address'[[:space:]]'\([^']*\)'.*/\1/p") ; do
-		append_server_address "$addr"
-	done
-	temp_config="$config_file"
 
 	TRANSPARENT_PROXY_EXPECTED=1
 
 	procd_open_instance "$NAME.$section"
 	procd_set_param command "$v2ray_file"
-	if [ "$CORE" = "V2Ray" ] && [ "$(expr $CORE_VER \< "5")" = "1" ] ; then
-		procd_append_param command "-c=$temp_config"
+	
+	if [ "$is_v4" = "1" ] ; then
+		procd_append_param command "-config=$config_file"
 	else
 		procd_append_param command "run"
-		procd_append_param command "-c=$temp_config"
+		procd_append_param command "-c=$config_file"
 	fi
+	
 	procd_set_param respawn
 
 	if [ -n "$asset_location" ] && [ -d "$asset_location" ] ; then
 		procd_set_param env V2RAY_LOCATION_ASSET="$asset_location"
+		procd_set_param env XRAY_LOCATION_ASSET="$asset_location"
 	fi
 
-	# cat /proc/PID/limits to see if limits works
 	procd_set_param limits nofile="102400 102400"
 	procd_append_param limits core="0 0"
 
-	procd_set_param file "$temp_config"
-	procd_set_param stderr 1 # forward stderr of the command to logd
+	procd_set_param file "$config_file"
+	procd_set_param stderr 1 
 	procd_set_param stdout 1
 	procd_set_param pidfile "/var/run/${NAME}.${section}.pid"
+	
 	procd_close_instance
+	_info "SYSTEM" "Instance [$section] passed to Procd supervisor."
 }
 
 start_service() {
+	_info "BOOT" "=== Initiating V2Ray/Xray Subsystem (fw3) ==="
+	
 	clear_transparent_proxy
-
 	config_load "$NAME"
 
 	if ! init_transparent_proxy ; then
@@ -681,24 +468,17 @@ start_service() {
 	setup_transparent_proxy
 	gracefully_restart_dnsmasq
 
-	unset OUTBOUND_SERVERS_V4 \
-		OUTBOUND_SERVERS_V6 \
-		TRANSPARENT_PROXY_EXPECTED \
-		TRANSPARENT_PROXY_PORT \
-		TRANSPARENT_PROXY_ADDITION \
-		DNSMASQ_RESTART_EXPECTED \
-		IPV6_TPROXY_ENABLED
+	unset TRANSPARENT_PROXY_EXPECTED TRANSPARENT_PROXY_PORT TRANSPARENT_PROXY_ADDITION DNSMASQ_RESTART_EXPECTED
 }
 
 stop_service() {
 	if [ "x$action" = "xrestart" ] ; then
-		# skip when restarting, start_service will do this
 		return 0
 	fi
 
+	_info "HALT" "=== Tearing down V2Ray/Xray Subsystem (fw3) ==="
 	clear_transparent_proxy
 	gracefully_restart_dnsmasq
-
 }
 
 service_triggers() {
