@@ -1,15 +1,14 @@
 {
-  "admin/services/tp": {
-    "title": "TP",
+	"admin/services/tp": {
+		"title": "V2Ray 透明代理",
     "order": 60,
-    "action": {
-      "type": "view",
-      "path": "tp/main"
-    },
-    "depends": {
-      "acl": [
-        "luci-app-tp"
-      ]
-    }
-  }
+		"action": {
+			"type": "view",
+			"path": "tp/main"
+		},
+		"depends": {
+			"acl": [ "luci-app-tp" ],
+			"uci": { "v2ray": true }
+		}
+	}
 }
