@@ -286,17 +286,21 @@ setup_transparent_proxy() {
 
 	create_v2ray_ipset
 
+	# 智能联动：只有开启了 IPv6 TProxy，才要求 Dnsmasq 接管 IPv6 解析记录
+	local set6_proxy=""
+	local set6_direct=""
+	if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
+		set6_proxy="$IPSET_DST_PROXY_V6"
+		set6_direct="$IPSET_DST_DIRECT_V6"
+	fi
+
 	echo "# AUTO-GENERATED FILE. DO NOT MODIFY." >"$FILE_V2RAY_DNSMASQ_CACHE"
 
-	process_list "directlist" "$direct_list_dns" "$IPSET_DST_DIRECT_V4" "$IPSET_DST_DIRECT_V6"
+	# 将原本硬编码的 $IPSET_DST_XXXX_V6 替换为动态变量
+	process_list "directlist" "$direct_list_dns" "$IPSET_DST_DIRECT_V4" "$set6_direct"
 	process_list "srcdirectlist" "" "$IPSET_SRC_DIRECT_V4" ""
-	process_list "proxylist" "$proxy_list_dns" "$IPSET_DST_PROXY_V4" "$IPSET_DST_PROXY_V6"
-
-	# ==========================================
-	# 补回这行：强制将 gfwlist.txt 也解析并压入代理名单和 Dnsmasq 中
-	# [注释]: 如果 gfwlist 很大，可能会占用几秒钟时间，并且会向 Dnsmasq 增加大量规则。
-	process_list "gfwlist" "$proxy_list_dns" "$IPSET_DST_PROXY_V4" "$IPSET_DST_PROXY_V6"
-	# ==========================================
+	process_list "proxylist" "$proxy_list_dns" "$IPSET_DST_PROXY_V4" "$set6_proxy"
+	process_list "gfwlist" "$proxy_list_dns" "$IPSET_DST_PROXY_V4" "$set6_proxy"
 
 	local ext_args="ip daddr @$IPSET_DST_PROXY_V4"
 	local ext_args6="ip6 daddr @$IPSET_DST_PROXY_V6"
