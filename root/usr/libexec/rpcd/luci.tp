@@ -108,7 +108,7 @@ get_list_status() {
 # 严格的 Ubus 方法分发路由
 case "$1" in
 	list)
-		json_set_namespace "v2ray_list" old_ns
+		json_set_namespace "tp_list" old_ns
 		json_init
 
 		json_add_object "runningStatus"
@@ -135,7 +135,7 @@ case "$1" in
 			;;
 			listStatus)
 				read input;
-				json_set_namespace "v2ray_listStatus" old_ns
+				json_set_namespace "tp_listStatus" old_ns
 				json_load "$input"
 				json_get_var list_name "name"
 				json_cleanup
