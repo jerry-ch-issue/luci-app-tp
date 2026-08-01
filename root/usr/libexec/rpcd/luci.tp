@@ -7,7 +7,7 @@
 . /usr/share/libubox/jshn.sh
 
 check_running_status() {
-	local pid="$(cat /var/run/v2ray.main.pid 2>/dev/null)"
+	local pid="$(cat /var/run/tp.main.pid 2>/dev/null)"
 
 	# 1. PID 文件不存在
 	if [ -z "$pid" ] ; then
@@ -15,7 +15,7 @@ check_running_status() {
 		return
 	fi
 
-	local file="$(uci -q get v2ray.main.v2ray_file)"
+	local file="$(uci -q get tp.main.v2ray_file)"
 	if [ -z "$file" ] ; then
 		echo '{ "code": 2 }'
 		return
@@ -37,7 +37,7 @@ check_running_status() {
 }
 
 get_v2ray_version() {
-	local file="$(uci -q get v2ray.main.v2ray_file)"
+	local file="$(uci -q get tp.main.v2ray_file)"
 	[ -z "$file" ] && file="/usr/bin/v2ray"
 
 	if [ ! -s "$file" ] ; then
@@ -70,11 +70,11 @@ get_v2ray_version() {
 
 	case "$core" in
 		V2Ray|Xray|xray|v2ray)
-			if uci get v2ray.main >/dev/null 2>&1; then
-				uci set v2ray.main.core="$core"
-				uci set v2ray.main.version="$ver"
-				[ -n "$major" ] && uci set v2ray.main.major="$major"
-				uci commit v2ray
+			if uci get tp.main >/dev/null 2>&1; then
+				uci set tp.main.core="$core"
+				uci set tp.main.version="$ver"
+				[ -n "$major" ] && uci set tp.main.major="$major"
+				uci commit tp
 			fi
 			printf '{ "code": 0, "version": "Core: %s, Version: %s" }\n' "$core" "$ver"
 		;;
