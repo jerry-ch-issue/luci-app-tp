@@ -3,28 +3,25 @@
     "description": "Grant access to LuCI app tp",
     "read": {
       "ubus": {
-        "luci.v2ray": [
+        "luci.tp": [
           "*"
         ]
       },
       "uci": [
-        "v2ray"
+        "tp"
       ],
       "file": {
         "/etc/v2ray/*": [
           "read"
         ],
-        "/var/etc/v2ray/*": [
-          "read"
-        ],
-        "/etc/init.d/v2ray": [
+        "/etc/init.d/tp": [
           "exec"
         ]
       }
     },
     "write": {
       "uci": [
-        "v2ray"
+        "tp"
       ],
       "file": {
         "/etc/v2ray/*": [
