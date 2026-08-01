@@ -1,6 +1,6 @@
 {
 	"admin/services/tp": {
-		"title": "V2Ray 透明代理",
+		"title": "TProxy 透明代理",
 		"order": 60,
 		"action": {
 			"type": "view",
@@ -8,7 +8,7 @@
 		},
 		"depends": {
 			"acl": [ "luci-app-tp" ],
-			"uci": { "v2ray": true }
+			"uci": { "tp": true }
 		}
 	}
 }
