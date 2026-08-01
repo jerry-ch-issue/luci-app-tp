@@ -8,7 +8,7 @@
 
 return view.extend({
 	handleServiceReload: function(ev) {
-		return fs.exec('/etc/init.d/v2ray', ['reload'])
+		return fs.exec('/etc/init.d/tp', ['reload'])
 			.then(L.bind(function(btn, res) {
 				if (res.code !== 0) {
 					ui.addNotification(null, [
@@ -26,9 +26,9 @@ return view.extend({
 	render: function() {
 		var m, s, o;
 
-		m = new form.Map('v2ray', _('tp'));
+		m = new form.Map('tp', _('tp'));
 
-		s = m.section(form.NamedSection, 'main', 'v2ray', _('Global Settings'));
+		s = m.section(form.NamedSection, 'main', 'tp', _('Global Settings'));
 		s.anonymous = true;
 		s.addremove = false;
 
