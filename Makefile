@@ -17,7 +17,7 @@ LUCI_TITLE:=LuCI support for tp (V2Ray / Xray)
 
 # 完美契合 FW3 与 TProxy 高性能机制的精确依赖栈
 LUCI_DEPENDS:=+jshn +ip +iptables +ip6tables +ipset +kmod-ipt-tproxy \
-	+iptables-mod-tproxy +iptables-mod-socket +resolveip +dnsmasq-full +procd-ujail
+	+iptables-mod-tproxy +resolveip +dnsmasq-full
 LUCI_PKGARCH:=all
 
 # 注册用户配置文件，防止跨版本升级时被覆盖重置
