@@ -6,10 +6,10 @@
 
 START=99
 USE_PROCD=1
-NAME=v2ray
+NAME=tp
 
-FILE_V2RAY_DNSMASQ=/tmp/dnsmasq.d/$NAME
-FILE_V2RAY_DNSMASQ_CACHE=/tmp/$NAME.dnsmasq.cache
+FILE_TP_DNSMASQ=/tmp/dnsmasq.d/$NAME
+FILE_TP_DNSMASQ_CACHE=/tmp/$NAME.dnsmasq.cache
 
 CORE=""
 CORE_VER=""
@@ -19,11 +19,11 @@ IPT_BIN=$(command -v iptables)
 IP6T_BIN=$(command -v ip6tables)
 IPSET_BIN=$(command -v ipset)
 
-IPSET_DST_PROXY_V4=v2ray_dst_proxy_v4
-IPSET_DST_PROXY_V6=v2ray_dst_proxy_v6
-IPSET_SRC_DIRECT_V4=v2ray_src_direct_v4
-IPSET_DST_DIRECT_V4=v2ray_dst_direct_v4
-IPSET_DST_DIRECT_V6=v2ray_dst_direct_v6
+IPSET_DST_PROXY_V4=tp_dst_proxy_v4
+IPSET_DST_PROXY_V6=tp_dst_proxy_v6
+IPSET_SRC_DIRECT_V4=tp_src_direct_v4
+IPSET_DST_DIRECT_V4=tp_dst_direct_v4
+IPSET_DST_DIRECT_V6=tp_dst_direct_v6
 
 TRANSPARENT_PROXY_EXPECTED=0
 TRANSPARENT_PROXY_PORT=""
@@ -48,8 +48,8 @@ _info() { _log "info"    "INFO"  "$1" "$2"; }
 _warn() { _log "warning" "WARN"  "$1" "$2"; }
 _err()  { _log "err"     "ERROR" "$1" "$2"; }
 
-v2ray_section_validate() {
-	uci_validate_section "$NAME" "v2ray" "$1" \
+tp_section_validate() {
+	uci_validate_section "$NAME" "tp" "$1" \
 		'enabled:bool:0' \
 		'v2ray_file:string' \
 		'asset_location:directory' \
@@ -61,24 +61,24 @@ v2ray_section_validate() {
 # 边界防御：fw3 需要精确解绑 Mangle 表中的 PREROUTING/OUTPUT 钩子。
 # 使用严格统一的 table 100 语法，兼容极简版 Busybox ip 模块。
 # ==============================================================================
-clear_v2ray_rules() {
+clear_tp_rules() {
 	_info "SYSTEM" "Flushing iptables/ip6tables and ipset rules..."
 	
 	# IPv4 钩子解绑与自定义链销毁
-	while $IPT_BIN -t mangle -D PREROUTING -j V2RAY_DIVERT 2>/dev/null; do true; done
-	while $IPT_BIN -t mangle -D OUTPUT -j V2RAY_OUTPUT 2>/dev/null; do true; done
+	while $IPT_BIN -t mangle -D PREROUTING -j TP_DIVERT 2>/dev/null; do true; done
+	while $IPT_BIN -t mangle -D OUTPUT -j TP_OUTPUT 2>/dev/null; do true; done
 	
-	for chain in V2RAY_DIVERT V2RAY_RULES V2RAY_OUTPUT; do
+	for chain in TP_DIVERT TP_RULES TP_OUTPUT; do
 		$IPT_BIN -t mangle -F $chain 2>/dev/null
 		$IPT_BIN -t mangle -X $chain 2>/dev/null
 	done
 
 	# IPv6 钩子解绑与自定义链销毁
 	if [ -n "$IP6T_BIN" ]; then
-		while $IP6T_BIN -t mangle -D PREROUTING -j V2RAY_DIVERT 2>/dev/null; do true; done
-		while $IP6T_BIN -t mangle -D OUTPUT -j V2RAY_OUTPUT 2>/dev/null; do true; done
+		while $IP6T_BIN -t mangle -D PREROUTING -j TP_DIVERT 2>/dev/null; do true; done
+		while $IP6T_BIN -t mangle -D OUTPUT -j TP_OUTPUT 2>/dev/null; do true; done
 		
-		for chain in V2RAY_DIVERT V2RAY_RULES V2RAY_OUTPUT; do
+		for chain in TP_DIVERT TP_RULES TP_OUTPUT; do
 			$IP6T_BIN -t mangle -F $chain 2>/dev/null
 			$IP6T_BIN -t mangle -X $chain 2>/dev/null
 		done
@@ -99,10 +99,10 @@ clear_v2ray_rules() {
 }
 
 clear_transparent_proxy() {
-	clear_v2ray_rules
-	if [ -f "$FILE_V2RAY_DNSMASQ" ] ; then
+	clear_tp_rules
+	if [ -f "$FILE_TP_DNSMASQ" ] ; then
 		_info "CLEANUP" "Purging legacy Dnsmasq rules."
-		rm -f "$FILE_V2RAY_DNSMASQ"
+		rm -f "$FILE_TP_DNSMASQ"
 		DNSMASQ_RESTART_EXPECTED=1
 	fi
 }
@@ -111,7 +111,7 @@ clear_transparent_proxy() {
 # 模块：IPSet 集合分配与内存回收 (Timeout 机制)
 # 核心防御：追加 -! 标识忽略已存在报错。开启 7天 timeout 防止内存无限膨胀。
 # ==============================================================================
-create_v2ray_ipset() {
+create_tp_ipset() {
 	local reserved_v4="
 		0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8
 		169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24
@@ -154,9 +154,9 @@ process_list() {
 	test -r "$filepath" || return
 	_info "PARSER" "Processing routing list: $listname.txt"
 
-	local tmp_ipset="/tmp/v2ray_ipset_${listname}.txt"
+	local tmp_ipset="/tmp/tp_ipset_${listname}.txt"
 
-	awk -v dns="$dns_server" -v s4="$set4" -v s6="$set6" -v d_file="$FILE_V2RAY_DNSMASQ_CACHE" \
+	awk -v dns="$dns_server" -v s4="$set4" -v s6="$set6" -v d_file="$FILE_TP_DNSMASQ_CACHE" \
 	    -v f_ipset="$tmp_ipset" '
 	{
 		sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, "");
@@ -196,7 +196,7 @@ process_list() {
 # 架构解析：全面接管 PREROUTING 与 OUTPUT 链。
 # TPROXY target 直接交接流量；打 mark 利用路由表 100 环回给 TProxy。
 # ==============================================================================
-add_v2ray_iptables_tproxy_rules() {
+add_tp_iptables_tproxy_rules() {
 	local lan_devices="$1"
 	local port="$TRANSPARENT_PROXY_PORT"
 	local addition="$TRANSPARENT_PROXY_ADDITION"
@@ -213,71 +213,71 @@ add_v2ray_iptables_tproxy_rules() {
 	# ----------------------------------------------------
 	# IPv4 编排 (Mangle Table)
 	# ----------------------------------------------------
-	$IPT_BIN -t mangle -N V2RAY_DIVERT
-	$IPT_BIN -t mangle -N V2RAY_RULES
-	$IPT_BIN -t mangle -N V2RAY_OUTPUT
+	$IPT_BIN -t mangle -N TP_DIVERT
+	$IPT_BIN -t mangle -N TP_RULES
+	$IPT_BIN -t mangle -N TP_OUTPUT
 
-	$IPT_BIN -t mangle -A V2RAY_DIVERT -p tcp -m socket -j MARK --set-mark 1
-	$IPT_BIN -t mangle -A V2RAY_DIVERT -p tcp -m socket -j ACCEPT
+	$IPT_BIN -t mangle -A TP_DIVERT -p tcp -m socket -j MARK --set-mark 1
+	$IPT_BIN -t mangle -A TP_DIVERT -p tcp -m socket -j ACCEPT
 	if [ -n "$lan_devices" ]; then
 		for device in $lan_devices; do
-			[ -n "$device" ] && $IPT_BIN -t mangle -A V2RAY_DIVERT -i "$device" -j V2RAY_RULES
+			[ -n "$device" ] && $IPT_BIN -t mangle -A TP_DIVERT -i "$device" -j TP_RULES
 		done
 	fi
-	$IPT_BIN -t mangle -A V2RAY_DIVERT -m mark --mark 1 -j V2RAY_RULES
+	$IPT_BIN -t mangle -A TP_DIVERT -m mark --mark 1 -j TP_RULES
 
-	$IPT_BIN -t mangle -A V2RAY_RULES -m mark --mark 0xff -j RETURN
-	$IPT_BIN -t mangle -A V2RAY_RULES -m set --match-set $IPSET_DST_DIRECT_V4 dst -j RETURN
-	$IPT_BIN -t mangle -A V2RAY_RULES -m set --match-set $IPSET_SRC_DIRECT_V4 src -j RETURN
-	$IPT_BIN -t mangle -A V2RAY_RULES -p tcp -m set --match-set $IPSET_DST_PROXY_V4 dst -j TPROXY --on-port $port --tproxy-mark 1
+	$IPT_BIN -t mangle -A TP_RULES -m mark --mark 0xff -j RETURN
+	$IPT_BIN -t mangle -A TP_RULES -m set --match-set $IPSET_DST_DIRECT_V4 dst -j RETURN
+	$IPT_BIN -t mangle -A TP_RULES -m set --match-set $IPSET_SRC_DIRECT_V4 src -j RETURN
+	$IPT_BIN -t mangle -A TP_RULES -p tcp -m set --match-set $IPSET_DST_PROXY_V4 dst -j TPROXY --on-port $port --tproxy-mark 1
 	if [ "$addition" = "udp" ]; then
-		$IPT_BIN -t mangle -A V2RAY_RULES -p udp -m set --match-set $IPSET_DST_PROXY_V4 dst -j TPROXY --on-port $port --tproxy-mark 1
+		$IPT_BIN -t mangle -A TP_RULES -p udp -m set --match-set $IPSET_DST_PROXY_V4 dst -j TPROXY --on-port $port --tproxy-mark 1
 	fi
 
-	$IPT_BIN -t mangle -A V2RAY_OUTPUT -m mark --mark 0xff -j ACCEPT
-	$IPT_BIN -t mangle -A V2RAY_OUTPUT -m set --match-set $IPSET_DST_DIRECT_V4 dst -j ACCEPT
-	$IPT_BIN -t mangle -A V2RAY_OUTPUT -m set --match-set $IPSET_SRC_DIRECT_V4 src -j ACCEPT
-	$IPT_BIN -t mangle -A V2RAY_OUTPUT -p tcp -m set --match-set $IPSET_DST_PROXY_V4 dst -j MARK --set-mark 1
+	$IPT_BIN -t mangle -A TP_OUTPUT -m mark --mark 0xff -j ACCEPT
+	$IPT_BIN -t mangle -A TP_OUTPUT -m set --match-set $IPSET_DST_DIRECT_V4 dst -j ACCEPT
+	$IPT_BIN -t mangle -A TP_OUTPUT -m set --match-set $IPSET_SRC_DIRECT_V4 src -j ACCEPT
+	$IPT_BIN -t mangle -A TP_OUTPUT -p tcp -m set --match-set $IPSET_DST_PROXY_V4 dst -j MARK --set-mark 1
 	if [ "$addition" = "udp" ]; then
-		$IPT_BIN -t mangle -A V2RAY_OUTPUT -p udp -m set --match-set $IPSET_DST_PROXY_V4 dst -j MARK --set-mark 1
+		$IPT_BIN -t mangle -A TP_OUTPUT -p udp -m set --match-set $IPSET_DST_PROXY_V4 dst -j MARK --set-mark 1
 	fi
 
-	$IPT_BIN -t mangle -I PREROUTING -j V2RAY_DIVERT
-	$IPT_BIN -t mangle -I OUTPUT -j V2RAY_OUTPUT
+	$IPT_BIN -t mangle -I PREROUTING -j TP_DIVERT
+	$IPT_BIN -t mangle -I OUTPUT -j TP_OUTPUT
 
 	# ----------------------------------------------------
 	# IPv6 编排 (Mangle Table)
 	# ----------------------------------------------------
 	if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] && [ -n "$IP6T_BIN" ] ; then
-		$IP6T_BIN -t mangle -N V2RAY_DIVERT
-		$IP6T_BIN -t mangle -N V2RAY_RULES
-		$IP6T_BIN -t mangle -N V2RAY_OUTPUT
+		$IP6T_BIN -t mangle -N TP_DIVERT
+		$IP6T_BIN -t mangle -N TP_RULES
+		$IP6T_BIN -t mangle -N TP_OUTPUT
 
-		$IP6T_BIN -t mangle -A V2RAY_DIVERT -p tcp -m socket -j MARK --set-mark 1
-		$IP6T_BIN -t mangle -A V2RAY_DIVERT -p tcp -m socket -j ACCEPT
+		$IP6T_BIN -t mangle -A TP_DIVERT -p tcp -m socket -j MARK --set-mark 1
+		$IP6T_BIN -t mangle -A TP_DIVERT -p tcp -m socket -j ACCEPT
 		if [ -n "$lan_devices" ]; then
 			for device in $lan_devices; do
-				[ -n "$device" ] && $IP6T_BIN -t mangle -A V2RAY_DIVERT -i "$device" -j V2RAY_RULES
+				[ -n "$device" ] && $IP6T_BIN -t mangle -A TP_DIVERT -i "$device" -j TP_RULES
 			done
 		fi
-		$IP6T_BIN -t mangle -A V2RAY_DIVERT -m mark --mark 1 -j V2RAY_RULES
+		$IP6T_BIN -t mangle -A TP_DIVERT -m mark --mark 1 -j TP_RULES
 
-		$IP6T_BIN -t mangle -A V2RAY_RULES -m mark --mark 0xff -j RETURN
-		$IP6T_BIN -t mangle -A V2RAY_RULES -m set --match-set $IPSET_DST_DIRECT_V6 dst -j RETURN
-		$IP6T_BIN -t mangle -A V2RAY_RULES -p tcp -m set --match-set $IPSET_DST_PROXY_V6 dst -j TPROXY --on-port $port --tproxy-mark 1
+		$IP6T_BIN -t mangle -A TP_RULES -m mark --mark 0xff -j RETURN
+		$IP6T_BIN -t mangle -A TP_RULES -m set --match-set $IPSET_DST_DIRECT_V6 dst -j RETURN
+		$IP6T_BIN -t mangle -A TP_RULES -p tcp -m set --match-set $IPSET_DST_PROXY_V6 dst -j TPROXY --on-port $port --tproxy-mark 1
 		if [ "$addition" = "udp" ]; then
-			$IP6T_BIN -t mangle -A V2RAY_RULES -p udp -m set --match-set $IPSET_DST_PROXY_V6 dst -j TPROXY --on-port $port --tproxy-mark 1
+			$IP6T_BIN -t mangle -A TP_RULES -p udp -m set --match-set $IPSET_DST_PROXY_V6 dst -j TPROXY --on-port $port --tproxy-mark 1
 		fi
 
-		$IP6T_BIN -t mangle -A V2RAY_OUTPUT -m mark --mark 0xff -j ACCEPT
-		$IP6T_BIN -t mangle -A V2RAY_OUTPUT -m set --match-set $IPSET_DST_DIRECT_V6 dst -j ACCEPT
-		$IP6T_BIN -t mangle -A V2RAY_OUTPUT -p tcp -m set --match-set $IPSET_DST_PROXY_V6 dst -j MARK --set-mark 1
+		$IP6T_BIN -t mangle -A TP_OUTPUT -m mark --mark 0xff -j ACCEPT
+		$IP6T_BIN -t mangle -A TP_OUTPUT -m set --match-set $IPSET_DST_DIRECT_V6 dst -j ACCEPT
+		$IP6T_BIN -t mangle -A TP_OUTPUT -p tcp -m set --match-set $IPSET_DST_PROXY_V6 dst -j MARK --set-mark 1
 		if [ "$addition" = "udp" ]; then
-			$IP6T_BIN -t mangle -A V2RAY_OUTPUT -p udp -m set --match-set $IPSET_DST_PROXY_V6 dst -j MARK --set-mark 1
+			$IP6T_BIN -t mangle -A TP_OUTPUT -p udp -m set --match-set $IPSET_DST_PROXY_V6 dst -j MARK --set-mark 1
 		fi
 
-		$IP6T_BIN -t mangle -I PREROUTING -j V2RAY_DIVERT
-		$IP6T_BIN -t mangle -I OUTPUT -j V2RAY_OUTPUT
+		$IP6T_BIN -t mangle -I PREROUTING -j TP_DIVERT
+		$IP6T_BIN -t mangle -I OUTPUT -j TP_OUTPUT
 	fi
 }
 
@@ -322,7 +322,7 @@ setup_transparent_proxy() {
 
 	_info "TPROXY" "Activating Iptables Transparent Engine on port [${TRANSPARENT_PROXY_PORT}]"
 
-	create_v2ray_ipset
+	create_tp_ipset
 
 	local set6_proxy=""
 	local set6_direct=""
@@ -331,7 +331,7 @@ setup_transparent_proxy() {
 		set6_direct="$IPSET_DST_DIRECT_V6"
 	fi
 
-	echo "# AUTO-GENERATED FILE. DO NOT MODIFY." >"$FILE_V2RAY_DNSMASQ_CACHE"
+	echo "# AUTO-GENERATED FILE. DO NOT MODIFY." >"$FILE_TP_DNSMASQ_CACHE"
 
 	process_list "directlist" "$direct_list_dns" "$IPSET_DST_DIRECT_V4" "$set6_direct"
 	process_list "srcdirectlist" "" "$IPSET_SRC_DIRECT_V4" ""
@@ -339,11 +339,11 @@ setup_transparent_proxy() {
 	process_list "gfwlist" "$proxy_list_dns" "$IPSET_DST_PROXY_V4" "$set6_proxy"
 
 	# 原子操作更新 DNSMasq
-	if [ -f "$FILE_V2RAY_DNSMASQ_CACHE" ]; then
-		if cmp -s "$FILE_V2RAY_DNSMASQ_CACHE" "$FILE_V2RAY_DNSMASQ" 2>/dev/null; then
-			rm -f "$FILE_V2RAY_DNSMASQ_CACHE"
+	if [ -f "$FILE_TP_DNSMASQ_CACHE" ]; then
+		if cmp -s "$FILE_TP_DNSMASQ_CACHE" "$FILE_TP_DNSMASQ" 2>/dev/null; then
+			rm -f "$FILE_TP_DNSMASQ_CACHE"
 		else
-			mv -f "$FILE_V2RAY_DNSMASQ_CACHE" "$FILE_V2RAY_DNSMASQ" 2>/dev/null
+			mv -f "$FILE_TP_DNSMASQ_CACHE" "$FILE_TP_DNSMASQ" 2>/dev/null
 			DNSMASQ_RESTART_EXPECTED=1
 		fi
 	fi
@@ -361,14 +361,14 @@ setup_transparent_proxy() {
 		lan_devices=$(echo "$lan_devices" | tr ' ' '\n' | sort -u | tr '\n' ' ')
 	fi
 	
-	add_v2ray_iptables_tproxy_rules "$lan_devices"
+	add_tp_iptables_tproxy_rules "$lan_devices"
 }
 
 start_instance() {
 	local section="$1"
 	local ver_info
 	
-	if ! v2ray_section_validate "$section" ; then
+	if ! tp_section_validate "$section" ; then
 		_err "SYSTEM" "Validation failed for UCI section: $section"
 		return 1
 	fi
@@ -389,7 +389,7 @@ start_instance() {
 	
 	_info "SYSTEM" "Binary Fingerprint -> Engine: [$CORE] Version: [$CORE_VER]"
 	
-	uci set v2ray.main.core="$CORE"
+	uci set tp.main.core="$CORE"
 	uci commit
 
 	if [ "x$enabled" != "x1" ] ; then
@@ -463,7 +463,7 @@ start_service() {
 		return 1
 	fi
 
-	config_foreach start_instance "v2ray"
+	config_foreach start_instance "tp"
 
 	setup_transparent_proxy
 	gracefully_restart_dnsmasq
