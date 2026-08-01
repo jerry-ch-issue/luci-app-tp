@@ -1,4 +1,4 @@
-config v2ray 'main'
+config tp 'main'
 	option enabled '0'
 	option v2ray_file '/usr/bin/v2ray'
 	option config_file '/etc/v2ray/config.json'
