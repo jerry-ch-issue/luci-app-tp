@@ -4,14 +4,14 @@
 'require rpc';
 
 var callRunningStatus = rpc.declare({
-	object: 'luci.v2ray',
+	object: 'luci.tp',
 	method: 'runningStatus',
 	params: [],
 	expect: { '': { code: 1 } }
 });
 
 var callV2RayVersion = rpc.declare({
-	object: 'luci.v2ray',
+	object: 'luci.tp',
 	method: 'v2rayVersion',
 	params: [],
 	expect: { '': { code: 1 } },
