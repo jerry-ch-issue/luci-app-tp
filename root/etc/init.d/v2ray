@@ -226,17 +226,17 @@ add_v2ray_nftables_tproxy_rules() {
 						echo "ip6 daddr @$IPSET_DST_DIRECT_V6 counter return"
 					fi
 				)
-				tcp dport 0-65535 ip daddr @$IPSET_DST_PROXY_V4 counter tproxy ip to :$port meta mark set 1
+				tcp ip daddr @$IPSET_DST_PROXY_V4 counter tproxy ip to :$port meta mark set 1
 				$(
 					if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
-						echo "tcp dport 0-65535 ip6 daddr @$IPSET_DST_PROXY_V6 counter tproxy ip6 to :$port meta mark set 1"
+						echo "tcp ip6 daddr @$IPSET_DST_PROXY_V6 counter tproxy ip6 to :$port meta mark set 1"
 					fi
 				)
 				$(
 					if [ "$addition" = "udp" ] ; then
-						echo "udp dport 0-65535 ip daddr @$IPSET_DST_PROXY_V4 counter tproxy ip to :$port meta mark set 1"
+						echo "udp ip daddr @$IPSET_DST_PROXY_V4 counter tproxy ip to :$port meta mark set 1"
 						if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
-							echo "udp dport 0-65535 ip6 daddr @$IPSET_DST_PROXY_V6 counter tproxy ip6 to :$port meta mark set 1"
+							echo "udp ip6 daddr @$IPSET_DST_PROXY_V6 counter tproxy ip6 to :$port meta mark set 1"
 						fi
 					fi
 				)
@@ -251,17 +251,17 @@ add_v2ray_nftables_tproxy_rules() {
 						echo "ip6 daddr @$IPSET_DST_DIRECT_V6 counter accept"
 					fi
 				)
-				tcp dport 0-65535 ip daddr @$IPSET_DST_PROXY_V4 counter meta mark set 1
+				tcp ip daddr @$IPSET_DST_PROXY_V4 counter meta mark set 1
 				$(
 					if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
-						echo "tcp dport 0-65535 ip6 daddr @$IPSET_DST_PROXY_V6 counter meta mark set 1"
+						echo "tcp ip6 daddr @$IPSET_DST_PROXY_V6 counter meta mark set 1"
 					fi
 				)
 				$(
 					if [ "$addition" = "udp" ] ; then
-						echo "udp dport 0-65535 ip daddr @$IPSET_DST_PROXY_V4 counter meta mark set 1"
+						echo "udp ip daddr @$IPSET_DST_PROXY_V4 counter meta mark set 1"
 						if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
-							echo "udp dport 0-65535 ip6 daddr @$IPSET_DST_PROXY_V6 counter meta mark set 1"
+							echo "udp ip6 daddr @$IPSET_DST_PROXY_V6 counter meta mark set 1"
 						fi
 					fi
 				)
