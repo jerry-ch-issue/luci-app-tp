@@ -412,8 +412,8 @@ start_instance() {
 			return 1
 		fi
 	else
-		if ! "$v2ray_file" test -c "$config_file" >/dev/null 2>&1 ; then
-			_err "SYSTEM" "V5/Xray kernel syntax validation failed for $config_file"
+		if ! "$v2ray_file" run -test -c "$config_file" >/dev/null 2>&1 ; then
+			_err "SYSTEM" "Xray kernel syntax validation failed for $config_file"
 			return 1
 		fi
 	fi
