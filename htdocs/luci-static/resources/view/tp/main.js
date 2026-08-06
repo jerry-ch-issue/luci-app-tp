@@ -60,6 +60,12 @@ return view.extend({
 		o.datatype = 'port';
 		o.rmempty = false;
 
+		// --- 追加独立的 TProxy 端口配置 ---
+		o = s.option(form.Value, 'tproxy_port', _('TProxy Port'), _('UDP/IPv6 透明代理端口 (建议与 TCP 端口分开，例如 1082)'));
+		o.datatype = 'port';
+		o.default = '1082';
+		o.rmempty = false; // 必填项，防止生成 UCI 时字段丢失
+
 		o = s.option(widgets.NetworkSelect, 'lan_ifaces', _('LAN interfaces'));
 		o.multiple = true;
 		o.nocreate = true;
