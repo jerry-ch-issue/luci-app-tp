@@ -91,6 +91,8 @@ clear_tp_rules() {
 	if [ -n "$IP6T_BIN" ]; then
 		clean_refs "$IP6T_BIN" "mangle" "PREROUTING"
 		clean_refs "$IP6T_BIN" "mangle" "OUTPUT"
+		clean_refs "$IP6T_BIN" "nat" "PREROUTING"
+		clean_refs "$IP6T_BIN" "nat" "OUTPUT"
 	fi
 
 	for chain in TP_DIVERT TP_RULES TP_OUTPUT; do
@@ -101,6 +103,8 @@ clear_tp_rules() {
 		if [ -n "$IP6T_BIN" ]; then
 			$IP6T_BIN -t mangle -F $chain 2>/dev/null
 			$IP6T_BIN -t mangle -X $chain 2>/dev/null
+			$IP6T_BIN -t nat -F $chain 2>/dev/null
+			$IP6T_BIN -t nat -X $chain 2>/dev/null
 		fi
 	done
 
@@ -177,7 +181,7 @@ process_list() {
 	local tmp_ipset="/tmp/tp_ipset_${listname}.txt"
 
 	awk -v dns="$dns_server" -v s4="$set4" -v s6="$set6" -v d_file="$FILE_TP_DNSMASQ_CACHE" \
-	    -v f_ipset="$tmp_ipset" '
+		-v f_ipset="$tmp_ipset" '
 	{
 		sub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, "");
 		if ($0 == "" || $0 ~ /^#/) next;
@@ -229,7 +233,7 @@ add_tp_iptables_tproxy_rules() {
 	for i in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 0 > "$i" 2>/dev/null; done
 
 	# ==============================================================
-	# 2. IPv4 编排：TCP 走 REDIRECT (Nat Table)
+	# 2. IPv4 编排：TCP 走 REDIRECT (Nat 表) -> 发给 1081
 	# ==============================================================
 	$IPT_BIN -t nat -N TP_RULES
 	$IPT_BIN -t nat -A TP_RULES -m mark --mark 0xff -j RETURN
@@ -250,13 +254,12 @@ add_tp_iptables_tproxy_rules() {
 	$IPT_BIN -t nat -I OUTPUT -j TP_OUTPUT
 
 	# ==============================================================
-	# 3. IPv4 编排：UDP 走 TPROXY (Mangle Table)
+	# 3. IPv4 编排：UDP 走 TPROXY (Mangle 表) -> 发给 1082
 	# ==============================================================
 	if [ "$addition" = "udp" ]; then
 		ip rule add fwmark 1 table 100 2>/dev/null
 		ip route add local 0.0.0.0/0 dev lo table 100 2>/dev/null
 
-		$IPT_BIN -t mangle -N TP_DIVERT
 		$IPT_BIN -t mangle -N TP_RULES
 
 		$IPT_BIN -t mangle -A TP_RULES -m mark --mark 0xff -j RETURN
@@ -266,7 +269,6 @@ add_tp_iptables_tproxy_rules() {
 
 		if [ -n "$lan_devices" ]; then
 			for device in $lan_devices; do
-				[ -n "$device" ] && $IPT_BIN -t mangle -I PREROUTING -i "$device" -j TP_DIVERT
 				[ -n "$device" ] && $IPT_BIN -t mangle -A PREROUTING -i "$device" -j TP_RULES
 			done
 		fi
@@ -279,40 +281,53 @@ add_tp_iptables_tproxy_rules() {
 	fi
 
 	# ==============================================================
-	# 4. IPv6 编排：TCP+UDP 全量走 TPROXY (Mangle Table)
+	# 4. IPv6 编排：TCP 走 REDIRECT(1081), UDP 走 TPROXY(1082)
 	# ==============================================================
 	if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] && [ -n "$IP6T_BIN" ] ; then
-		ip -6 rule add fwmark 1 table 100 2>/dev/null
-		ip -6 route add local ::/0 dev lo table 100 2>/dev/null
+		# 4.1 IPv6 TCP 彻底切换为 REDIRECT (避开 TProxy TCP 握手丢包死局)
+		$IP6T_BIN -t nat -N TP_RULES 2>/dev/null
+		if [ $? -eq 0 ]; then
+			$IP6T_BIN -t nat -A TP_RULES -m mark --mark 0xff -j RETURN
+			$IP6T_BIN -t nat -A TP_RULES -m set --match-set $IPSET_DST_DIRECT_V6 dst -j RETURN
+			$IP6T_BIN -t nat -A TP_RULES -p tcp -m set --match-set $IPSET_DST_PROXY_V6 dst -j REDIRECT --to-ports $port
 
-		$IP6T_BIN -t mangle -N TP_DIVERT
-		$IP6T_BIN -t mangle -N TP_RULES
-		$IP6T_BIN -t mangle -N TP_OUTPUT
+			if [ -n "$lan_devices" ]; then
+				for device in $lan_devices; do
+					[ -n "$device" ] && $IP6T_BIN -t nat -I PREROUTING -i "$device" -j TP_RULES
+				done
+			fi
 
-		$IP6T_BIN -t mangle -A TP_DIVERT -p tcp -m socket -j MARK --set-mark 1
-		$IP6T_BIN -t mangle -A TP_DIVERT -p tcp -m socket -j ACCEPT
-
-		if [ -n "$lan_devices" ]; then
-			for device in $lan_devices; do
-				[ -n "$device" ] && $IP6T_BIN -t mangle -I PREROUTING -i "$device" -j TP_DIVERT
-				[ -n "$device" ] && $IP6T_BIN -t mangle -A PREROUTING -i "$device" -j TP_RULES
-			done
+			$IP6T_BIN -t nat -N TP_OUTPUT
+			$IP6T_BIN -t nat -A TP_OUTPUT -m mark --mark 0xff -j RETURN
+			$IP6T_BIN -t nat -A TP_OUTPUT -m set --match-set $IPSET_DST_DIRECT_V6 dst -j RETURN
+			$IP6T_BIN -t nat -A TP_OUTPUT -p tcp -m set --match-set $IPSET_DST_PROXY_V6 dst -j REDIRECT --to-ports $port
+			$IP6T_BIN -t nat -I OUTPUT -j TP_OUTPUT
+		else
+			_warn "SYSTEM" "ip6tables NAT module missing. IPv6 TCP proxy might fail."
 		fi
 
-		$IP6T_BIN -t mangle -A TP_RULES -m mark --mark 0xff -j RETURN
-		$IP6T_BIN -t mangle -A TP_RULES -m set --match-set $IPSET_DST_DIRECT_V6 dst -j RETURN
-		$IP6T_BIN -t mangle -A TP_RULES -p tcp -m set --match-set $IPSET_DST_PROXY_V6 dst -j TPROXY --on-port $tproxy_port --on-ip ::1 --tproxy-mark 1
+		# 4.2 IPv6 UDP 继续保留 TPROXY (因为 UDP 无握手状态，无 Bug)
 		if [ "$addition" = "udp" ]; then
-			$IP6T_BIN -t mangle -A TP_RULES -p udp -m set --match-set $IPSET_DST_PROXY_V6 dst -j TPROXY --on-port $tproxy_port --on-ip ::1 --tproxy-mark 1
-		fi
+			ip -6 rule add fwmark 1 table 100 2>/dev/null
+			ip -6 route add local ::/0 dev lo table 100 2>/dev/null
 
-		$IP6T_BIN -t mangle -A TP_OUTPUT -m mark --mark 0xff -j ACCEPT
-		$IP6T_BIN -t mangle -A TP_OUTPUT -m set --match-set $IPSET_DST_DIRECT_V6 dst -j ACCEPT
-		$IP6T_BIN -t mangle -A TP_OUTPUT -p tcp -m set --match-set $IPSET_DST_PROXY_V6 dst -j MARK --set-mark 1
-		if [ "$addition" = "udp" ]; then
+			$IP6T_BIN -t mangle -N TP_RULES
+			$IP6T_BIN -t mangle -A TP_RULES -m mark --mark 0xff -j RETURN
+			$IP6T_BIN -t mangle -A TP_RULES -m set --match-set $IPSET_DST_DIRECT_V6 dst -j RETURN
+			$IP6T_BIN -t mangle -A TP_RULES -p udp -m set --match-set $IPSET_DST_PROXY_V6 dst -j TPROXY --on-port $tproxy_port --tproxy-mark 1
+
+			if [ -n "$lan_devices" ]; then
+				for device in $lan_devices; do
+					[ -n "$device" ] && $IP6T_BIN -t mangle -A PREROUTING -i "$device" -j TP_RULES
+				done
+			fi
+
+			$IP6T_BIN -t mangle -N TP_OUTPUT
+			$IP6T_BIN -t mangle -A TP_OUTPUT -m mark --mark 0xff -j ACCEPT
+			$IP6T_BIN -t mangle -A TP_OUTPUT -m set --match-set $IPSET_DST_DIRECT_V6 dst -j ACCEPT
 			$IP6T_BIN -t mangle -A TP_OUTPUT -p udp -m set --match-set $IPSET_DST_PROXY_V6 dst -j MARK --set-mark 1
+			$IP6T_BIN -t mangle -I OUTPUT -j TP_OUTPUT
 		fi
-		$IP6T_BIN -t mangle -I OUTPUT -j TP_OUTPUT
 	fi
 }
 
@@ -492,7 +507,7 @@ start_instance() {
 	procd_append_param limits core="0 0"
 
 	procd_set_param file "$config_file"
-	procd_set_param stderr 1 
+	procd_set_param stderr 1
 	procd_set_param stdout 1
 	procd_set_param pidfile "/var/run/${NAME}.${section}.pid"
 	
