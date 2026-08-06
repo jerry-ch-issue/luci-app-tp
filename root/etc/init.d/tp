@@ -259,9 +259,6 @@ add_tp_iptables_tproxy_rules() {
 		$IPT_BIN -t mangle -N TP_DIVERT
 		$IPT_BIN -t mangle -N TP_RULES
 
-		$IPT_BIN -t mangle -A TP_DIVERT -p udp -m socket -j MARK --set-mark 1
-		$IPT_BIN -t mangle -A TP_DIVERT -p udp -m socket -j ACCEPT
-
 		$IPT_BIN -t mangle -A TP_RULES -m mark --mark 0xff -j RETURN
 		$IPT_BIN -t mangle -A TP_RULES -m set --match-set $IPSET_DST_DIRECT_V4 dst -j RETURN
 		$IPT_BIN -t mangle -A TP_RULES -m set --match-set $IPSET_SRC_DIRECT_V4 src -j RETURN
@@ -294,10 +291,6 @@ add_tp_iptables_tproxy_rules() {
 
 		$IP6T_BIN -t mangle -A TP_DIVERT -p tcp -m socket -j MARK --set-mark 1
 		$IP6T_BIN -t mangle -A TP_DIVERT -p tcp -m socket -j ACCEPT
-		if [ "$addition" = "udp" ]; then
-			$IP6T_BIN -t mangle -A TP_DIVERT -p udp -m socket -j MARK --set-mark 1
-			$IP6T_BIN -t mangle -A TP_DIVERT -p udp -m socket -j ACCEPT
-		fi
 
 		if [ -n "$lan_devices" ]; then
 			for device in $lan_devices; do
@@ -392,6 +385,9 @@ setup_transparent_proxy() {
 
 	# 原子操作更新 DNSMasq
 	if [ -f "$FILE_TP_DNSMASQ_CACHE" ]; then
+		# [修复点]: 确保目标目录存在
+		mkdir -p "$(dirname "$FILE_TP_DNSMASQ")"
+
 		if cmp -s "$FILE_TP_DNSMASQ_CACHE" "$FILE_TP_DNSMASQ" 2>/dev/null; then
 			rm -f "$FILE_TP_DNSMASQ_CACHE"
 		else
