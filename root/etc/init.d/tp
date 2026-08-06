@@ -63,26 +63,46 @@ tp_section_validate() {
 # ==============================================================================
 clear_tp_rules() {
 	_info "SYSTEM" "Flushing iptables/ip6tables and ipset rules..."
-	
-	# IPv4 钩子解绑与自定义链销毁
-	while $IPT_BIN -t mangle -D PREROUTING -j TP_DIVERT 2>/dev/null; do true; done
-	while $IPT_BIN -t mangle -D OUTPUT -j TP_OUTPUT 2>/dev/null; do true; done
-	
+
+	# ==============================================================
+	# 独家修复：动态寻找并剥离所有指向我们自定义链的规则 (无视网卡名称)
+	# ==============================================================
+	clean_refs() {
+		local cmd="$1"
+		local table="$2"
+		local chain="$3"
+		for target in TP_DIVERT TP_RULES TP_OUTPUT; do
+			while true; do
+				# 根据行号动态抓取并删除
+				local rule_num=$($cmd -t $table -L $chain -n --line-numbers 2>/dev/null | grep -w "$target" | awk '{print $1}' | head -n1)
+				[ -z "$rule_num" ] && break
+				$cmd -t $table -D $chain $rule_num 2>/dev/null
+			done
+		done
+	}
+
+	# 剥离并清理 IPv4 引用和自定义链
+	clean_refs "$IPT_BIN" "mangle" "PREROUTING"
+	clean_refs "$IPT_BIN" "mangle" "OUTPUT"
+	clean_refs "$IPT_BIN" "nat" "PREROUTING"
+	clean_refs "$IPT_BIN" "nat" "OUTPUT"
+
+	# 剥离并清理 IPv6 引用
+	if [ -n "$IP6T_BIN" ]; then
+		clean_refs "$IP6T_BIN" "mangle" "PREROUTING"
+		clean_refs "$IP6T_BIN" "mangle" "OUTPUT"
+	fi
+
 	for chain in TP_DIVERT TP_RULES TP_OUTPUT; do
 		$IPT_BIN -t mangle -F $chain 2>/dev/null
 		$IPT_BIN -t mangle -X $chain 2>/dev/null
-	done
-
-	# IPv6 钩子解绑与自定义链销毁
-	if [ -n "$IP6T_BIN" ]; then
-		while $IP6T_BIN -t mangle -D PREROUTING -j TP_DIVERT 2>/dev/null; do true; done
-		while $IP6T_BIN -t mangle -D OUTPUT -j TP_OUTPUT 2>/dev/null; do true; done
-		
-		for chain in TP_DIVERT TP_RULES TP_OUTPUT; do
+		$IPT_BIN -t nat -F $chain 2>/dev/null
+		$IPT_BIN -t nat -X $chain 2>/dev/null
+		if [ -n "$IP6T_BIN" ]; then
 			$IP6T_BIN -t mangle -F $chain 2>/dev/null
 			$IP6T_BIN -t mangle -X $chain 2>/dev/null
-		done
-	fi
+		fi
+	done
 
 	# 统一清理路由规则 (解决 Busybox lookup 与 table 语法歧义)
 	while ip rule del fwmark 1 table 100 2>/dev/null ; do true ; done
@@ -199,74 +219,98 @@ process_list() {
 add_tp_iptables_tproxy_rules() {
 	local lan_devices="$1"
 	local port="$TRANSPARENT_PROXY_PORT"
+	# [修改]: 接收从 UCI 传递过来的全局变量
+	local tproxy_port="$TRANSPARENT_TPROXY_PORT"
 	local addition="$TRANSPARENT_PROXY_ADDITION"
 	
 	test -n "$port" || return
 
-	ip rule add fwmark 1 table 100
-	ip route add local 0.0.0.0/0 dev lo table 100
-	if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] ; then
-		ip -6 rule add fwmark 1 table 100
-		ip -6 route add local ::/0 dev lo table 100
-	fi
+	# 1. 暴力关闭所有网卡的 rp_filter (防止一切暗坑)
+	for i in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 0 > "$i" 2>/dev/null; done
 
-	# ----------------------------------------------------
-	# IPv4 编排 (Mangle Table)
-	# ----------------------------------------------------
-	$IPT_BIN -t mangle -N TP_DIVERT
-	$IPT_BIN -t mangle -N TP_RULES
-	$IPT_BIN -t mangle -N TP_OUTPUT
+	# ==============================================================
+	# 2. IPv4 编排：TCP 走 REDIRECT (Nat Table)
+	# ==============================================================
+	$IPT_BIN -t nat -N TP_RULES
+	$IPT_BIN -t nat -A TP_RULES -m mark --mark 0xff -j RETURN
+	$IPT_BIN -t nat -A TP_RULES -m set --match-set $IPSET_DST_DIRECT_V4 dst -j RETURN
+	$IPT_BIN -t nat -A TP_RULES -m set --match-set $IPSET_SRC_DIRECT_V4 src -j RETURN
+	$IPT_BIN -t nat -A TP_RULES -p tcp -m set --match-set $IPSET_DST_PROXY_V4 dst -j REDIRECT --to-ports $port
 
-	$IPT_BIN -t mangle -A TP_DIVERT -p tcp -m socket -j MARK --set-mark 1
-	$IPT_BIN -t mangle -A TP_DIVERT -p tcp -m socket -j ACCEPT
 	if [ -n "$lan_devices" ]; then
 		for device in $lan_devices; do
-			[ -n "$device" ] && $IPT_BIN -t mangle -A TP_DIVERT -i "$device" -j TP_RULES
+			[ -n "$device" ] && $IPT_BIN -t nat -I PREROUTING -i "$device" -j TP_RULES
 		done
 	fi
-	$IPT_BIN -t mangle -A TP_DIVERT -m mark --mark 1 -j TP_RULES
 
-	$IPT_BIN -t mangle -A TP_RULES -m mark --mark 0xff -j RETURN
-	$IPT_BIN -t mangle -A TP_RULES -m set --match-set $IPSET_DST_DIRECT_V4 dst -j RETURN
-	$IPT_BIN -t mangle -A TP_RULES -m set --match-set $IPSET_SRC_DIRECT_V4 src -j RETURN
-	$IPT_BIN -t mangle -A TP_RULES -p tcp -m set --match-set $IPSET_DST_PROXY_V4 dst -j TPROXY --on-port $port --tproxy-mark 1
-	if [ "$addition" = "udp" ]; then
-		$IPT_BIN -t mangle -A TP_RULES -p udp -m set --match-set $IPSET_DST_PROXY_V4 dst -j TPROXY --on-port $port --tproxy-mark 1
-	fi
+	$IPT_BIN -t nat -N TP_OUTPUT
+	$IPT_BIN -t nat -A TP_OUTPUT -m mark --mark 0xff -j RETURN
+	$IPT_BIN -t nat -A TP_OUTPUT -m set --match-set $IPSET_DST_DIRECT_V4 dst -j RETURN
+	$IPT_BIN -t nat -A TP_OUTPUT -p tcp -m set --match-set $IPSET_DST_PROXY_V4 dst -j REDIRECT --to-ports $port
+	$IPT_BIN -t nat -I OUTPUT -j TP_OUTPUT
 
-	$IPT_BIN -t mangle -A TP_OUTPUT -m mark --mark 0xff -j ACCEPT
-	$IPT_BIN -t mangle -A TP_OUTPUT -m set --match-set $IPSET_DST_DIRECT_V4 dst -j ACCEPT
-	$IPT_BIN -t mangle -A TP_OUTPUT -m set --match-set $IPSET_SRC_DIRECT_V4 src -j ACCEPT
-	$IPT_BIN -t mangle -A TP_OUTPUT -p tcp -m set --match-set $IPSET_DST_PROXY_V4 dst -j MARK --set-mark 1
+	# ==============================================================
+	# 3. IPv4 编排：UDP 走 TPROXY (Mangle Table)
+	# ==============================================================
 	if [ "$addition" = "udp" ]; then
+		ip rule add fwmark 1 table 100 2>/dev/null
+		ip route add local 0.0.0.0/0 dev lo table 100 2>/dev/null
+
+		$IPT_BIN -t mangle -N TP_DIVERT
+		$IPT_BIN -t mangle -N TP_RULES
+
+		$IPT_BIN -t mangle -A TP_DIVERT -p udp -m socket -j MARK --set-mark 1
+		$IPT_BIN -t mangle -A TP_DIVERT -p udp -m socket -j ACCEPT
+
+		$IPT_BIN -t mangle -A TP_RULES -m mark --mark 0xff -j RETURN
+		$IPT_BIN -t mangle -A TP_RULES -m set --match-set $IPSET_DST_DIRECT_V4 dst -j RETURN
+		$IPT_BIN -t mangle -A TP_RULES -m set --match-set $IPSET_SRC_DIRECT_V4 src -j RETURN
+		$IPT_BIN -t mangle -A TP_RULES -p udp -m set --match-set $IPSET_DST_PROXY_V4 dst -j TPROXY --on-port $tproxy_port --on-ip 127.0.0.1 --tproxy-mark 1
+
+		if [ -n "$lan_devices" ]; then
+			for device in $lan_devices; do
+				[ -n "$device" ] && $IPT_BIN -t mangle -I PREROUTING -i "$device" -j TP_DIVERT
+				[ -n "$device" ] && $IPT_BIN -t mangle -A PREROUTING -i "$device" -j TP_RULES
+			done
+		fi
+
+		$IPT_BIN -t mangle -N TP_OUTPUT
+		$IPT_BIN -t mangle -A TP_OUTPUT -m mark --mark 0xff -j RETURN
+		$IPT_BIN -t mangle -A TP_OUTPUT -m set --match-set $IPSET_DST_DIRECT_V4 dst -j RETURN
 		$IPT_BIN -t mangle -A TP_OUTPUT -p udp -m set --match-set $IPSET_DST_PROXY_V4 dst -j MARK --set-mark 1
+		$IPT_BIN -t mangle -I OUTPUT -j TP_OUTPUT
 	fi
 
-	$IPT_BIN -t mangle -I PREROUTING -j TP_DIVERT
-	$IPT_BIN -t mangle -I OUTPUT -j TP_OUTPUT
-
-	# ----------------------------------------------------
-	# IPv6 编排 (Mangle Table)
-	# ----------------------------------------------------
+	# ==============================================================
+	# 4. IPv6 编排：TCP+UDP 全量走 TPROXY (Mangle Table)
+	# ==============================================================
 	if [ "x$TRANSPARENT_PROXY_IPV6" = "x1" ] && [ -n "$IP6T_BIN" ] ; then
+		ip -6 rule add fwmark 1 table 100 2>/dev/null
+		ip -6 route add local ::/0 dev lo table 100 2>/dev/null
+
 		$IP6T_BIN -t mangle -N TP_DIVERT
 		$IP6T_BIN -t mangle -N TP_RULES
 		$IP6T_BIN -t mangle -N TP_OUTPUT
 
 		$IP6T_BIN -t mangle -A TP_DIVERT -p tcp -m socket -j MARK --set-mark 1
 		$IP6T_BIN -t mangle -A TP_DIVERT -p tcp -m socket -j ACCEPT
+		if [ "$addition" = "udp" ]; then
+			$IP6T_BIN -t mangle -A TP_DIVERT -p udp -m socket -j MARK --set-mark 1
+			$IP6T_BIN -t mangle -A TP_DIVERT -p udp -m socket -j ACCEPT
+		fi
+
 		if [ -n "$lan_devices" ]; then
 			for device in $lan_devices; do
-				[ -n "$device" ] && $IP6T_BIN -t mangle -A TP_DIVERT -i "$device" -j TP_RULES
+				[ -n "$device" ] && $IP6T_BIN -t mangle -I PREROUTING -i "$device" -j TP_DIVERT
+				[ -n "$device" ] && $IP6T_BIN -t mangle -A PREROUTING -i "$device" -j TP_RULES
 			done
 		fi
-		$IP6T_BIN -t mangle -A TP_DIVERT -m mark --mark 1 -j TP_RULES
 
 		$IP6T_BIN -t mangle -A TP_RULES -m mark --mark 0xff -j RETURN
 		$IP6T_BIN -t mangle -A TP_RULES -m set --match-set $IPSET_DST_DIRECT_V6 dst -j RETURN
-		$IP6T_BIN -t mangle -A TP_RULES -p tcp -m set --match-set $IPSET_DST_PROXY_V6 dst -j TPROXY --on-port $port --tproxy-mark 1
+		$IP6T_BIN -t mangle -A TP_RULES -p tcp -m set --match-set $IPSET_DST_PROXY_V6 dst -j TPROXY --on-port $tproxy_port --on-ip ::1 --tproxy-mark 1
 		if [ "$addition" = "udp" ]; then
-			$IP6T_BIN -t mangle -A TP_RULES -p udp -m set --match-set $IPSET_DST_PROXY_V6 dst -j TPROXY --on-port $port --tproxy-mark 1
+			$IP6T_BIN -t mangle -A TP_RULES -p udp -m set --match-set $IPSET_DST_PROXY_V6 dst -j TPROXY --on-port $tproxy_port --on-ip ::1 --tproxy-mark 1
 		fi
 
 		$IP6T_BIN -t mangle -A TP_OUTPUT -m mark --mark 0xff -j ACCEPT
@@ -275,8 +319,6 @@ add_tp_iptables_tproxy_rules() {
 		if [ "$addition" = "udp" ]; then
 			$IP6T_BIN -t mangle -A TP_OUTPUT -p udp -m set --match-set $IPSET_DST_PROXY_V6 dst -j MARK --set-mark 1
 		fi
-
-		$IP6T_BIN -t mangle -I PREROUTING -j TP_DIVERT
 		$IP6T_BIN -t mangle -I OUTPUT -j TP_OUTPUT
 	fi
 }
@@ -291,9 +333,11 @@ gracefully_restart_dnsmasq() {
 
 init_transparent_proxy() {
 	local tp_cfg="main_transparent_proxy"
-	local redirect_port redirect_udp ipv6_tproxy
+	local redirect_port tproxy_port redirect_udp ipv6_tproxy
 
 	config_get redirect_port "$tp_cfg" "redirect_port"
+	# [新增]: 从 UCI 配置中读取独立的 TProxy 端口
+	config_get tproxy_port "$tp_cfg" "tproxy_port"
 	config_get_bool redirect_udp "$tp_cfg" "redirect_udp" "0"
 	config_get_bool ipv6_tproxy "$tp_cfg" "ipv6_tproxy" "0"
 	
@@ -302,7 +346,15 @@ init_transparent_proxy() {
 		return 1
 	fi
 
+	# [新增]: 校验 tproxy_port 的合法性
+	if [ -n "$tproxy_port" ] && ! validate_data "port" "$tproxy_port" 2>/dev/null ; then
+		_err "CONFIG" "Invalid TProxy port parameter: ${tproxy_port}"
+		return 1
+	fi
+
 	TRANSPARENT_PROXY_PORT="$redirect_port"
+	# [新增]: 导出变量。如果 UCI 中未配置 tproxy_port，默认回退到 1082
+	TRANSPARENT_TPROXY_PORT="${tproxy_port:-1082}"
 	TRANSPARENT_PROXY_IPV6="$ipv6_tproxy"
 	TRANSPARENT_PROXY_ADDITION=$( [ "x$redirect_udp" = "x1" ] && echo "udp" || echo "" )
 }
@@ -468,7 +520,7 @@ start_service() {
 	setup_transparent_proxy
 	gracefully_restart_dnsmasq
 
-	unset TRANSPARENT_PROXY_EXPECTED TRANSPARENT_PROXY_PORT TRANSPARENT_PROXY_ADDITION DNSMASQ_RESTART_EXPECTED
+	unset TRANSPARENT_PROXY_EXPECTED TRANSPARENT_PROXY_PORT TRANSPARENT_TPROXY_PORT TRANSPARENT_PROXY_ADDITION DNSMASQ_RESTART_EXPECTED
 }
 
 stop_service() {
